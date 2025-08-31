@@ -21,7 +21,8 @@ const BASE_INCOME = 2;        // per turn or per tick income
 
 // Upgrades
 const UPGRADE_BANK_COST = 100;
-const UPGRADE_FORT_COST = 200;
+const UPGRADE_FORT_COST = 300;
+const UPGRADE_CITY_COST = 200;
 // ------------------------------------------------------------
 
 class GameRoom extends colyseus.Room {
@@ -171,6 +172,19 @@ class GameRoom extends colyseus.Room {
     client.send("history", historyWithCrowns);
     client.send("lobbyStartTime", { ts: this.lobbyStartTime });
 
+    // Send this player's current points + maxPoints immediately
+    try {
+      const pr = this.db.getPlayerPoints(this.gameId, playerId);
+      client.send("pointsUpdate", {
+        playerId,
+        points: pr.points,
+        tiles: this.db.getHexCountForPlayer(this.gameId, playerId),
+        maxPoints: pr.maxPoints
+      });
+    } catch (e) {
+      // ignore
+    }
+
     const rosterArray = Object.entries(this.players).map(([pid, p]) => ({
       playerId: pid,
       username: p.username,
@@ -226,8 +240,15 @@ class GameRoom extends colyseus.Room {
 
     this.broadcast("update", { q, r, color: player.color, crown: true });
     player.started = true;
-    const points = this.db.getPlayerPoints(this.gameId, playerId).points;
-    this.broadcast("pointsUpdate", { playerId, points, tiles: this.db.getHexCountForPlayer(this.gameId, playerId) });
+
+    // send pointsUpdate including maxPoints
+    const pp = this.db.getPlayerPoints(this.gameId, playerId);
+    this.broadcast("pointsUpdate", {
+      playerId,
+      points: pp.points,
+      tiles: this.db.getHexCountForPlayer(this.gameId, playerId),
+      maxPoints: pp.maxPoints
+    });
   }
 
   handleFillHex(client, data) {
@@ -257,17 +278,62 @@ class GameRoom extends colyseus.Room {
       return;
     }
 
+    // Deduct points (this will clamp to current maxPoints)
     this.db.updatePlayerPoints(this.gameId, playerId, currentPoints - cost);
+
+    // Remember previous owner for max recalculation after capture
+    const prevOwnerId = occupied && occupied.playerId ? occupied.playerId : null;
+
+    // Transfer ownership (preserve existing upgrade column)
     this.db.setHex(this.gameId, q, r, playerId, player.color);
     this.db.saveClickToGame(this.gameId, playerId, player.color, q, r);
     
-    console.log(`Player ${playerId} spent ${cost}, has ${currentPoints - cost} left`);
+    console.log(`Player ${playerId} spent ${cost}, attempted capture at ${q},${r}`);
 
+    // Server authoritative hex state after change
     const hex = this.db.getHexOwner(this.gameId, q, r);
+
+    // Broadcast tile change
     this.broadcast("update", { q, r, color: player.color, upgrade: hex.upgrade || null });
 
-    const tiles = this.db.getHexCountForPlayer(this.gameId, playerId);
-    this.broadcast("pointsUpdate", { playerId, points: currentPoints - cost, tiles });
+    // Recalculate maxPoints for previous owner (they may have lost a bank)
+    if (prevOwnerId && prevOwnerId !== playerId) {
+      try {
+        const defenderRec = this.db.recalcMaxPoints(this.gameId, prevOwnerId);
+        const defenderTiles = this.db.getHexCountForPlayer(this.gameId, prevOwnerId);
+        this.broadcast("pointsUpdate", {
+          playerId: prevOwnerId,
+          points: defenderRec.points,
+          tiles: defenderTiles,
+          maxPoints: defenderRec.maxPoints
+        });
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // Recalculate maxPoints for attacker (they may have gained a bank from the captured tile)
+    try {
+      const attackerRec = this.db.recalcMaxPoints(this.gameId, playerId);
+      const tiles = this.db.getHexCountForPlayer(this.gameId, playerId);
+      this.broadcast("pointsUpdate", {
+        playerId,
+        points: attackerRec.points,
+        tiles,
+        maxPoints: attackerRec.maxPoints
+      });
+    } catch (e) {
+      // fallback: broadcast current points
+      const pp = this.db.getPlayerPoints(this.gameId, playerId);
+      this.broadcast("pointsUpdate", {
+        playerId,
+        points: pp.points,
+        tiles: this.db.getHexCountForPlayer(this.gameId, playerId),
+        maxPoints: pp.maxPoints
+      });
+    }
+
+    // Notify success to caller (optional). We only send failures earlier.
   }
 
   // NEW: handle upgrade requests from client
@@ -275,11 +341,11 @@ class GameRoom extends colyseus.Room {
     const playerId = this.getPlayerIdBySession(client.sessionId);
     if (!playerId) return client.send("upgradeResult", { ok: false, error: "no player" });
 
-    const type = typeof data?.type === "string" ? data.type : null; // 'bank' or 'fort'
+    const type = typeof data?.type === "string" ? data.type : null; // 'bank' or 'fort' or city
     const q = Math.floor(data?.q ?? 0);
     const r = Math.floor(data?.r ?? 0);
 
-    if (!type || (type !== "bank" && type !== "fort")) {
+    if (!type || (type !== "bank" && type !== "fort" && type !== "city")) {
       return client.send("upgradeResult", { ok: false, error: "invalid upgrade" });
     }
 
@@ -289,17 +355,24 @@ class GameRoom extends colyseus.Room {
       return client.send("upgradeResult", { ok: false, error: "not owner" });
     }
 
-    // cost check
+   // cost check
     const row = this.db.getPlayerPoints(this.gameId, playerId);
     const currentPoints = row?.points ?? 0;
-    const cost = (type === "bank") ? UPGRADE_BANK_COST : UPGRADE_FORT_COST;
+    let cost = 0;
+    if (type === "bank") cost = UPGRADE_BANK_COST;
+    else if (type === "fort") cost = UPGRADE_FORT_COST;
+    else if (type === "city") cost = UPGRADE_CITY_COST;
+
     if (currentPoints < cost) {
       return client.send("upgradeResult", { ok: false, error: "insufficient" });
     }
 
     // Deduct points and persist upgrade
     const newPoints = currentPoints - cost;
+    // update points (this will clamp to current maxPoints before bank effect)
     this.db.updatePlayerPoints(this.gameId, playerId, newPoints);
+
+    // Set the upgrade on the hex (this will record upgrade_ts)
     this.db.setHexUpgrade(this.gameId, q, r, type);
 
     // optionally log as a click/history event as well
@@ -308,12 +381,15 @@ class GameRoom extends colyseus.Room {
     // Broadcast hex update (clients will display emoji)
     this.broadcast("update", { q, r, color: hex.color || this.players[playerId].color, upgrade: type });
 
-    // Broadcast points update to everyone
+    // Recalculate maxPoints for this player (buying a bank increases their cap)
+    const rec = this.db.recalcMaxPoints(this.gameId, playerId);
     const tiles = this.db.getHexCountForPlayer(this.gameId, playerId);
-    this.broadcast("pointsUpdate", { playerId, points: newPoints, tiles });
 
-    client.send("upgradeResult", { ok: true, type, points: newPoints });
-    console.log(`Player ${playerId} purchased ${type} for ${cost} (left ${newPoints}) at ${q},${r}`);
+    // Broadcast points update to everyone (with updated maxPoints)
+    this.broadcast("pointsUpdate", { playerId, points: rec.points, tiles, maxPoints: rec.maxPoints });
+
+    client.send("upgradeResult", { ok: true, type, points: rec.points, maxPoints: rec.maxPoints });
+    console.log(`Player ${playerId} purchased ${type} for ${cost} (left ${rec.points}) at ${q},${r}`);
   }
 
   startPointTick() {
@@ -324,34 +400,47 @@ class GameRoom extends colyseus.Room {
       const upgradeCounts = this.db.getPlayerUpgradeCounts(this.gameId);
 
       allPlayers.forEach(p => {
-        let points = p.points || 0;
+        // fetch latest row (contains points/maxPoints)
+        let row = this.db.getPlayerPoints(this.gameId, p.playerId);
+        let points = row.points || 0;
         const tiles = this.db.getHexCountForPlayer(this.gameId, p.playerId) || 0;
-        const banks = upgradeCounts[p.playerId]?.banks || 0;
-        const forts = upgradeCounts[p.playerId]?.forts || 0;
 
-        // 1. Base income per tick
+        // Make sure your DB returns 0 when undefined
+        const banks  = upgradeCounts[p.playerId]?.banks  || 0;
+        const forts  = upgradeCounts[p.playerId]?.forts  || 0;
+        const cities = upgradeCounts[p.playerId]?.cities || 0;
+
+        // 1) Base income
         points += BASE_INCOME;
-        let tileValue = HEX_VALUE + (banks * 2)
 
-        // 2. Income from hexes (value minus maintenance)
-        // Each hex gives HEX_VALUE points but costs HEX_MAINTCOST to maintain
+        // 2) Income from owned hexes (value - maintenance)
         const hexIncome = tiles * (HEX_VALUE - HEX_MAINTCOST);
         points += hexIncome;
 
-        // 3. Extra income from banks
-        // Each bank boosts income by a small amount per tick
-        points += banks * 10;
+        // 3) Extra income from CITIES (moved here from banks)
+        //    Keep your old +10 per (now tied to city), or tweak as you like.
+        points += cities * 10;
 
-        // 4. Optional: adjust for forts if you want them to affect income indirectly
-        // (not mandatory, forts mostly impact attack cost)
-        // points += forts * 2; 
+        // Banks DO NOT add income anymore; they only raise max points (via recalcMaxPoints)
 
         // Ensure points never go negative
         if (points < 0) points = 0;
 
-        // Update DB and broadcast
+        // Persist (clamped to current maxPoints)
         this.db.updatePlayerPoints(this.gameId, p.playerId, points);
-        this.broadcast("pointsUpdate", { playerId: p.playerId, points, tiles, forts, banks });
+
+        const updated = this.db.getPlayerPoints(this.gameId, p.playerId);
+
+        // include cities in broadcast (optional but handy for HUD/debug)
+        this.broadcast("pointsUpdate", {
+          playerId: p.playerId,
+          points: updated.points,
+          tiles,
+          forts,
+          banks,
+          cities,
+          maxPoints: updated.maxPoints
+        });
       });
     }, 2000); // every 2 seconds
   }

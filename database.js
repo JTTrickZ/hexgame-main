@@ -287,6 +287,7 @@ function createPlayersTable(gameId) {
     CREATE TABLE IF NOT EXISTS ${table} (
       playerId TEXT PRIMARY KEY,
       points INTEGER NOT NULL DEFAULT 10,
+      maxPoints INTEGER NOT NULL DEFAULT 50, -- 💰 new cap column
       startQ INTEGER,
       startR INTEGER,
       lastUpdate INTEGER NOT NULL
@@ -299,10 +300,11 @@ function initPlayerInGame(gameId, playerId, startQ, startR) {
   const table = createPlayersTable(gameId);
 
   db.prepare(`
-    INSERT OR IGNORE INTO ${table} (playerId, points, startQ, startR, lastUpdate)
-    VALUES (?, 10, ?, ?, ?)
+    INSERT OR IGNORE INTO ${table} (playerId, points, maxPoints, startQ, startR, lastUpdate)
+    VALUES (?, 10, 50, ?, ?, ?)
   `).run(playerId, startQ, startR, Date.now());
 
+  // update spawn coords
   db.prepare(`
     UPDATE ${table}
     SET startQ = ?, startR = ?, lastUpdate = ?
@@ -317,10 +319,30 @@ function initPlayerInGame(gameId, playerId, startQ, startR) {
   return db.prepare(`SELECT * FROM ${table} WHERE playerId = ?`).get(playerId);
 }
 
+
+function recalcMaxPoints(gameId, playerId) {
+  const upgrades = getPlayerUpgradeCounts(gameId);
+  const banks = upgrades[playerId]?.banks || 0;
+  const table = safePlayersTableName(gameId);
+  const baseCap = 200;
+  const perBank = 150;
+  const newCap = baseCap + banks * perBank;
+
+  const row = getPlayerPoints(gameId, playerId);
+  const clamped = Math.min(row.points, newCap);
+
+  db.prepare(`UPDATE ${table} SET maxPoints = ?, points = ?, lastUpdate = ? WHERE playerId = ?`)
+    .run(newCap, clamped, Date.now(), playerId);
+
+  return { points: clamped, maxPoints: newCap };
+}
+
 function updatePlayerPoints(gameId, playerId, points) {
   const table = safePlayersTableName(gameId);
+  const row = getPlayerPoints(gameId, playerId);
+  const capped = Math.min(points, row.maxPoints);
   db.prepare(`UPDATE ${table} SET points = ?, lastUpdate = ? WHERE playerId = ?`)
-    .run(points, Date.now(), playerId);
+    .run(capped, Date.now(), playerId);
 }
 
 function getPlayerPoints(gameId, playerId) {
@@ -328,8 +350,8 @@ function getPlayerPoints(gameId, playerId) {
   let row = db.prepare(`SELECT * FROM ${table} WHERE playerId = ?`).get(playerId);
   if (!row) {
     db.prepare(`
-      INSERT INTO ${table} (playerId, points, startQ, startR, lastUpdate)
-      VALUES (?, 10, NULL, NULL, ?)
+      INSERT INTO ${table} (playerId, points, maxPoints, startQ, startR, lastUpdate)
+      VALUES (?, 10, 50, NULL, NULL, ?)
     `).run(playerId, Date.now());
     row = db.prepare(`SELECT * FROM ${table} WHERE playerId = ?`).get(playerId);
   }
@@ -342,10 +364,11 @@ function getPlayerUpgradeCounts(gameId) {
 
   allHexes.forEach(h => {
     if (!h.upgrade) return;
-    if (!counts[h.playerId]) counts[h.playerId] = { forts: 0, banks: 0 };
+    if (!counts[h.playerId]) counts[h.playerId] = { forts: 0, banks: 0, cities: 0};
 
     if (h.upgrade === "fort") counts[h.playerId].forts += 1;
     if (h.upgrade === "bank") counts[h.playerId].banks += 1;
+    if (h.upgrade === "City") counts[h.playerId].cities += 1;
   });
 
   return counts;
@@ -368,5 +391,5 @@ module.exports = {
   addPlayerToLobby, removePlayerFromLobby, getLobbyPlayers,
   createGameTable, saveClickToGame, getClicksForGame, safePlayersTableName, safeTableName, createPlayersTable, initPlayerInGame,
   updatePlayerPoints, getPlayerPoints, getAllPlayersInGame, createHexTable, setHex, setHexUpgrade: setHexUpgrade, getAllHexes, getHexOwner, getHexCountForPlayer, createGameTables, getHexUpgrade,
-  getAllUpgrades, getPlayerUpgradeCounts
+  getAllUpgrades, getPlayerUpgradeCounts, recalcMaxPoints
 };

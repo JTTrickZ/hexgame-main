@@ -24,6 +24,7 @@ const hudTiles = el("hudTiles");
 let upgradeModal = null;
 let fortifyBtn = null;
 let incomeBtn = null;
+let cityBtn = null;
 let closeModalBtn = null;
 
 if (el("roomIdLabel")) el("roomIdLabel").textContent = roomId || "—";
@@ -125,6 +126,7 @@ function drawHex(q, r, colorArg = "#0c0f1e", hover = false, cost = null) {
     let emoji = "❓";
     if (upgrade === "bank") emoji = "💰";
     if (upgrade === "fort") emoji = "🏰";
+    if (upgrade === "city") emoji = "🏢";
     ctx.strokeStyle = "rgba(0,0,0,0.8)";
     ctx.lineWidth = Math.max(2, Math.round(fontSize / 6));
     ctx.strokeText(emoji, cx, cy);
@@ -157,9 +159,11 @@ function renderRoster(list) {
 }
 
 // Canvas + grid
-let filled = {};
+let filled = {};           // authoritative state from server: { "q,r": { color, crown, upgrade } }
+let previews = {};         // temporary overlays: { "q,r": { type: "x", expiresAt: ts } }
 let myColor = "#5865f2";
 let myPoints = 0;
+let myMaxPoints = 50;
 let myTiles = 0;
 let gameStartTime = Date.now();
 
@@ -188,9 +192,32 @@ function drawGrid() {
       const crown = cell && cell.crown;
       const isHover = hoverHex && hoverHex.q === q && hoverHex.r === r;
       drawHex(q, r, { color: colorVal, crown, upgrade: upgradeVal }, isHover, isHover ? hoverCost : null);
+
+      // draw preview overlays on top of the authoritative tile (without changing tile)
+      const preview = previews[key];
+      if (preview) {
+        const { x, y } = hexToPixel(q, r);
+        const cx = offsetX + x * scale;
+        const cy = offsetY + y * scale;
+        const fontSize = Math.max(12, Math.round(HEX_SIZE * scale * 0.9));
+        ctx.font = `${fontSize}px sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.lineWidth = Math.max(2, Math.round(fontSize / 6));
+        ctx.strokeStyle = "rgba(0,0,0,0.8)";
+        ctx.fillStyle = "#fff";
+        if (preview.type === "x") {
+          ctx.strokeText("❌", cx, cy);
+          ctx.fillText("❌", cx, cy);
+        } else if (preview.type === "preview") {
+          // optional different marker if you later add
+          ctx.strokeText("•", cx, cy);
+          ctx.fillText("•", cx, cy);
+        }
+      }
     }
   }
-  hudPoints.textContent = `Points: ${myPoints}`;
+  hudPoints.textContent = `Points: ${myPoints} / Max: ${myMaxPoints}`;
   hudTiles.textContent = `Tiles: ${myTiles}`;
 }
 
@@ -235,7 +262,8 @@ let currentModalTile = null;
 function openUpgradeModal(q, r, currentUpgrade) {
   currentModalTile = { q, r, currentUpgrade };
   if (incomeBtn) incomeBtn.textContent = `💰 Bank (100 pts)`;
-  if (fortifyBtn) fortifyBtn.textContent = `🏰 Fort (200 pts)`;
+  if (fortifyBtn) fortifyBtn.textContent = `🏰 Fort (300 pts)`;
+  if (cityBtn) cityBtn.textContent = '🏢 City (200 pts)';
   if (upgradeModal) upgradeModal.classList.remove("hidden");
 }
 function closeUpgradeModal() {
@@ -259,6 +287,7 @@ function closeUpgradeModal() {
     upgradeModal = document.getElementById("upgradeModal");
     fortifyBtn = document.getElementById("fortifyBtn");
     incomeBtn = document.getElementById("incomeBtn");
+    cityBtn = document.getElementById("cityBtn");
     closeModalBtn = document.getElementById("closeModalBtn");
 
     // Safety: only add listeners if elements exist
@@ -276,6 +305,15 @@ function closeUpgradeModal() {
         room.send("upgradeHex", { q, r, type: "bank" });
       });
     }
+    if (cityBtn) {
+      cityBtn.addEventListener("click", () => {
+        if (!currentModalTile) return;
+        const { q, r} = currentModalTile;
+        room.send("upgradeHex", { q, r, type: "city" });
+      })
+
+    }
+
     if (closeModalBtn) closeModalBtn.addEventListener("click", () => closeUpgradeModal());
 
     room.onLeave(code => {
@@ -299,19 +337,34 @@ function closeUpgradeModal() {
       drawGrid();
     });
 
+    // server authoritative update: paint/upgrade a tile
     room.onMessage("update", ({ q, r, color, crown, upgrade }) => {
       const key = `${q},${r}`;
       filled[key] = { color: color || "#0c0f1e", crown: !!crown, upgrade: upgrade || null };
+      // clear any previews for this hex (e.g. an X) so we don't show overlays after success
+      if (previews[key]) {
+        delete previews[key];
+      }
       drawGrid();
     });
 
-    room.onMessage("pointsUpdate", ({ playerId: pid, points, tiles }) => {
+    room.onMessage("hoverCost", ({ q, r, cost }) => {
+      // Only show cost if this is the tile we’re hovering
+      if (hoverHex && hoverHex.q === q && hoverHex.r === r) {
+        hoverCost = cost;
+        drawGrid();
+      }
+    });
+
+    room.onMessage("pointsUpdate", ({ playerId: pid, points, tiles, maxPoints }) => {
+      // update local HUD when the message is about this player
       if (pid === playerId) {
-        myPoints = points;
-        myTiles = tiles;
+        myPoints = points ?? myPoints;
+        myTiles = tiles ?? myTiles;
+        myMaxPoints = maxPoints ?? myMaxPoints;
         drawGrid();
       } else {
-        // optionally update others if you show them
+        // optionally update others if you show them (not used for HUD right now)
       }
     });
 
@@ -324,30 +377,43 @@ function closeUpgradeModal() {
       countdownInterval = setInterval(updateCountdown, 500);
     });
 
-    room.onMessage("hoverCost", ({ q, r, cost }) => {
-      if (hoverHex && hoverHex.q === q && hoverHex.r === r) {
-        hoverCost = cost;
-        drawGrid();
+    // fill result: server tells us if fill failed (e.g. insufficient)
+    room.onMessage("fillResult", ({ q, r, ok, reason }) => {
+      const key = `${q},${r}`;
+      if (!ok) {
+        if (reason === "insufficient") {
+          // show a small ❌ overlay for 1s. do NOT mutate 'filled' - that's authoritative server state.
+          previews[key] = { type: "x" };
+          drawGrid();
+          setTimeout(() => {
+            if (previews[key]) {
+              delete previews[key];
+              drawGrid();
+            }
+          }, 1000);
+        } else {
+          // other reasons could be handled similarly
+          previews[key] = { type: "x" };
+          drawGrid();
+          setTimeout(() => {
+            delete previews[key];
+            drawGrid();
+          }, 800);
+        }
+      } else {
+        // ok === true: server might also broadcast "update" but clear preview just in case
+        if (previews[key]) {
+          delete previews[key];
+          drawGrid();
+        }
       }
     });
 
     // Owned tile menu: open upgrade modal
     room.onMessage("openOwnedTileMenu", ({ q, r, upgrade }) => {
-      openUpgradeModal(q, r, upgrade);
-    });
-
-    room.onMessage("fillResult", ({ q, r, ok, reason }) => {
-      if (!ok) {
-        if (reason === "insufficient") {
-          const key = `${q},${r}`;
-          // temporarily mark with red hover/cost warning
-          filled[key] = { color: "#0c0f1e", cost: "❌" };
-          drawGrid();
-          setTimeout(() => {
-            delete filled[key]?.cost;
-            drawGrid();
-          }, 1000); // clear after 1s
-        }
+      // only allow opening if not in a drag session (deliberate click)
+      if (!isDragging && !hadMoveDuringPointer) {
+        openUpgradeModal(q, r, upgrade);
       }
     });
 
@@ -446,15 +512,10 @@ function closeUpgradeModal() {
         lastSentHex = { q, r };
         hadMoveDuringPointer = true;
 
-        // optimistic visual update so the player sees progress immediately
-        const key = `${q},${r}`;
-        filled[key] = { color: myColor, upgrade: filled[key]?.upgrade || null };
-
-        // send to server
+        // DO NOT mutate 'filled' optimistically. Instead, send request to server and wait for authoritative "update".
         if (room) {
           room.send("fillHex", { q, r });
         }
-        drawGrid();
       }
     }, { passive: true });
 
@@ -465,22 +526,22 @@ function closeUpgradeModal() {
         pointerIdCaptured = null;
       }
 
-      // if we never had a move during this pointer session, treat as a click/tap
       const rect = canvas.getBoundingClientRect();
       const localX = e.clientX - rect.left;
       const localY = e.clientY - rect.top;
       const { q, r } = pixelToHex(localX, localY);
 
       if (!hadMoveDuringPointer) {
-        // single click behavior (chooseStart or single fill)
+        // ✅ deliberate click (no drag)
         const nowTs = Date.now();
         if (lobbyStartTime && nowTs <= lobbyStartTime + 5000 && !startChosen) {
+          // choose starting tile (optimistic for start)
           filled[`${q},${r}`] = { color: myColor, crown: true };
           drawGrid();
           if (room) room.send("chooseStart", { q, r });
           startChosen = true;
         } else {
-          // adjacency check for single click
+          // adjacency check
           const ownedKeys = Object.keys(filled).filter(k => {
             const v = filled[k];
             return (typeof v === "string" ? v : v.color) === myColor;
@@ -492,11 +553,7 @@ function closeUpgradeModal() {
           if (!isAdjacent && ownedKeys.length > 0) {
             // ignore
           } else {
-            // optimistic update & send single fill
-            const key = `${q},${r}`;
-        
             if (room) room.send("fillHex", { q, r });
-            
           }
         }
       }
