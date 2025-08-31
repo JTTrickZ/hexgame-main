@@ -1,0 +1,35 @@
+body {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  margin: 0; padding: 0;
+  background: #0f1221; color: #e8e9f1;
+}
+.container {
+  max-width: 720px; margin: 48px auto; padding: 24px;
+  background: #171a2b; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.4);
+}
+h1 { margin-top: 0; }
+code { background: #111428; padding: 2px 6px; border-radius: 6px; }
+
+.stats { display: grid; grid-template-columns: repeat(2,1fr); gap: 8px; margin: 16px 0 24px; }
+button {
+  background: #5865f2; color: white; border: none; padding: 12px 18px; border-radius: 10px;
+  cursor: pointer; font-weight: 700;
+}
+button:hover { filter: brightness(1.1); }
+
+.modal {
+  position: fixed; inset: 0; display: grid; place-items: center;
+  background: rgba(0,0,0,.6);
+}
+.modal.hidden { display: none; }
+.modal-card {
+  width: min(92vw, 420px);
+  background: #171a2b; padding: 24px; border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.4);
+}
+.modal-card input {
+  width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid #2b3052;
+  background: #0f1221; color: #fff; outline: none;
+}
+.modal-card .row { margin-top: 12px; display: flex; justify-content: flex-end; gap: 8px; }
+.row { display:flex; }
+.error { color: #ff6b6b; height: 20px; }

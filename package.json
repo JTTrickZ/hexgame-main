@@ -1,0 +1,20 @@
+{
+  "name": "webgame",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@colyseus/schema": "^3.0.56",
+    "better-sqlite3": "^12.2.0",
+    "colyseus": "^0.16.4",
+    "colyseus.js": "^0.16.19",
+    "express": "^5.1.0",
+    "socket.io": "^4.8.1"
+  }
+}

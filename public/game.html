@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Hex Game</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link href="style.css" rel="stylesheet" />
+  <style>
+    body, html {
+      margin: 0;
+      padding: 0;
+      background: #0c0f1e;
+      height: 100%;
+      overflow: hidden;
+      font-family: sans-serif;
+      color: #fff;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 16px;
+      background: #111428;
+      border-bottom: 1px solid #222;
+      height: 48px;
+      box-sizing: border-box;
+    }
+    .hud {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      font-size: 0.9em;
+    }
+    .roster {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .pill {
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: #1a1f36;
+      font-size: 0.85em;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: calc(100vh - 48px);
+      cursor: pointer;
+    }
+    button {
+      margin-left: 12px;
+      background: #1a1f36;
+      border: 1px solid #2b3355;
+      color: #fff;
+      padding: 6px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    small { opacity: .8; margin-left: 8px; }
+    /* modal styles reused from /public/style.css but included for safety */
+    .modal {
+      position: fixed; inset: 0; display: grid; place-items: center;
+      background: rgba(0,0,0,.6);
+    }
+    .modal.hidden { display: none; }
+    .modal-card {
+      width: min(92vw, 420px);
+      background: #171a2b; padding: 24px; border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.4);
+    }
+    .modal-card .row { margin-top: 12px; display: flex; justify-content: flex-end; gap: 8px; }
+    .modal-card button { cursor: pointer; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="hud">
+      <span id="roomIdLabel">—</span>
+      <span id="hudTime">Time: 0:00</span>
+      <span id="hudPoints">Points: 0</span>
+      <span id="hudTiles">Tiles: 0</span>
+      <!--<button id="replayBtn">Replay</button>-->
+      <small id="replayStatus"></small>
+    </div>
+    <div class="roster" id="roster"></div>
+  </header>
+  <canvas id="gameCanvas"></canvas>
+
+  <script src="/colyseus.js"></script>
+  <script src="game-client.js"></script>
+
+  <div id="upgradeModal" class="modal hidden">
+    <div class="modal-card">
+      <h3>Upgrade Tile</h3>
+      <div class="row">
+        <button id="fortifyBtn">🏰 Fort (200 pts)</button>
+        <button id="incomeBtn">💰 Bank (100 pts)</button>
+      </div>
+      <div class="row" style="justify-content:flex-end; margin-top:10px;">
+        <button id="closeModalBtn">Close</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

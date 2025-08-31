@@ -1,0 +1,17 @@
+networks:
+  br0.150:
+    external: true
+services:
+  hex-game:
+    hostname: hex-game
+    networks:
+      br0.150:
+        ipv4_address: 192.168.150.100
+    image: node:20-bullseye
+    container_name: hex-game-docker
+    working_dir: /app
+    volumes:
+      - /mnt/user/hexgame:/app   # Mount NAS share into container
+    ports:
+      - "3000:3000"
+    command: sh -c "npm install && node server.js"

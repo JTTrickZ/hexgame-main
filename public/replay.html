@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Replay</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link href="style.css" rel="stylesheet" />
+  <style>
+    body, html {
+      margin: 0;
+      padding: 0;
+      background: #0c0f1e;
+      height: 100%;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+      color: #fff;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 16px;
+      background: #111428;
+      border-bottom: 1px solid #222;
+      height: 48px;
+      box-sizing: border-box;
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex: 1;
+      margin-left: 12px;
+    }
+    .controls button {
+      background: #1a1f36;
+      border: 1px solid #2b3355;
+      color: #fff;
+      padding: 6px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    input[type=range] {
+      margin-left: 8px;
+      margin-right: 8px;
+      flex: 1;
+    }
+    small { opacity: .8; margin-left: 8px; }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: calc(100vh - 48px);
+      background: #0c0f1e;
+      cursor: default;
+    }
+    code { color: #a7f0ff; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      Replay: <code id="replayRoomLabel">—</code>
+    </div>
+    <div class="controls">
+      <button id="playBtn">▶</button>
+      <button id="pauseBtn">⏸</button>
+      <button id="stepBtn">⏭</button>
+      <input type="range" id="timeSlider" min="0" max="0" value="0" />
+      <small id="replayInfo"></small>
+    </div>
+  </header>
+
+  <canvas id="replayCanvas"></canvas>
+
+  <script src="/colyseus.js"></script>
+  <script src="replay-client.js"></script>
+</body>
+</html>
