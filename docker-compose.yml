@@ -1,11 +1,17 @@
 networks:
-  bro0:
-    external:true
+  hexnet:
+  driver: bridge
+  
+  ipam:
+    config:
+      - subnet: 192.168.1.0/24
+        gateway: 192.168.1.1
+    
 services:
   hex-game:
     hostname: hex-game
     networks:
-      br0:
+      hexnet:
         ipv4_address: 192.168.1.150
 
     image: node:20-bullseye
