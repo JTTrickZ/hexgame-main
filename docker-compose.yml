@@ -1,11 +1,12 @@
 networks:
   hexnet:
-  driver: bridge
-  
-  ipam:
-    config:
-      - subnet: 192.168.1.0/24
-        gateway: 192.168.1.1
+    driver: macvlan
+    driver_opts:
+      parent: ens18  # replace with your VM’s interface name
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
+          gateway: 192.168.1.1
     
 services:
   hex-game:
