@@ -1,4 +1,5 @@
 node_modules/
 Archive/
 game.db
+game.db-journal
 docker-compose-local.yml
