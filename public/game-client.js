@@ -363,6 +363,7 @@ function closeUpgradeModal() {
         myTiles = tiles ?? myTiles;
         myMaxPoints = maxPoints ?? myMaxPoints;
         drawGrid();
+        console.log(`DEBUG: pointsUpdate:`, myMaxPoints);
       } else {
         // optionally update others if you show them (not used for HUD right now)
       }

@@ -175,6 +175,7 @@ class GameRoom extends colyseus.Room {
     // Send this player's current points + maxPoints immediately
     try {
       const pr = this.db.getPlayerPoints(this.gameId, playerId);
+      console.log(`DEBUG: ${playerId} pointsUpdate:`, pr);
       client.send("pointsUpdate", {
         playerId,
         points: pr.points,
