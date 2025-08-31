@@ -19,7 +19,7 @@ services:
     container_name: hex-game-docker
     working_dir: /app
     volumes:
-      - root/hexgame-main:/app   # Mount NAS share into container
+      - hexgame-main:/app   # Mount NAS share into container
     ports:
       - "3000:3000"
     command: sh -c "npm install && node server.js"
