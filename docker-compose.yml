@@ -1,25 +1,17 @@
 networks:
-  hexnet:
-    driver: macvlan
-    driver_opts:
-      parent: ens18  # replace with your VM’s interface name
-    ipam:
-      config:
-        - subnet: 192.168.1.0/24
-          gateway: 192.168.1.1
-    
+  br0.150:
+    external: true
 services:
   hex-game:
     hostname: hex-game
     networks:
-      hexnet:
-        ipv4_address: 192.168.1.150
-
+      br0.150:
+        ipv4_address: 192.168.150.100
     image: node:20-bullseye
     container_name: hex-game-docker
     working_dir: /app
     volumes:
-      - /root/hexgame-main:/app   # Mount NAS share into container
+      - /mnt/user/hexgame:/app   # Mount NAS share into container
     ports:
       - "3000:3000"
     command: sh -c "npm install && node server.js"

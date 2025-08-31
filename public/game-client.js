@@ -181,7 +181,14 @@ let hadMoveDuringPointer = false;
 let lastSentHex = null; // { q, r } last hex we sent to server in this drag session
 let pointerIdCaptured = null;
 
+// Rendering loop control
+let needsRedraw = true;
+let rafId = null;
+let lastFrameTs = 0;
+const FRAME_MIN_MS = 1000 / 20; // ~40 FPS cap to keep CPU reasonable
+
 function drawGrid() {
+  // single responsibility: fully draw current keyboard state
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   for (let q = -GRID_RADIUS; q <= GRID_RADIUS; q++) {
     for (let r = Math.max(-GRID_RADIUS, -q - GRID_RADIUS); r <= Math.min(GRID_RADIUS, -q + GRID_RADIUS); r++) {
@@ -210,15 +217,57 @@ function drawGrid() {
           ctx.strokeText("❌", cx, cy);
           ctx.fillText("❌", cx, cy);
         } else if (preview.type === "preview") {
-          // optional different marker if you later add
           ctx.strokeText("•", cx, cy);
           ctx.fillText("•", cx, cy);
         }
       }
     }
   }
-  hudPoints.textContent = `Points: ${myPoints} / Max: ${myMaxPoints}`;
+  hudPoints.textContent = `Points: ${myPoints} / Max: ${myMaxPoints} :)`;
   hudTiles.textContent = `Tiles: ${myTiles}`;
+}
+
+// start/stop render loop
+function startRenderLoop() {
+  if (rafId) return;
+  rafId = requestAnimationFrame(renderLoop);
+}
+function stopRenderLoop() {
+  if (rafId) {
+    cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+}
+function renderLoop(ts) {
+  // Throttle to FRAME_MIN_MS
+  if (!lastFrameTs) lastFrameTs = ts || performance.now();
+  const delta = (ts || performance.now()) - lastFrameTs;
+  if (delta >= FRAME_MIN_MS || needsRedraw || isDragging) {
+    drawGrid();
+    lastFrameTs = ts || performance.now();
+    needsRedraw = false;
+  }
+  rafId = requestAnimationFrame(renderLoop);
+}
+
+// mark dirty helper
+function markDirty() {
+  needsRedraw = true;
+  // ensure loop is running
+  startRenderLoop();
+}
+
+// small helper to set preview with auto-clear
+function showPreviewX(q, r, duration = 1000) {
+  const key = `${q},${r}`;
+  previews[key] = { type: "x" };
+  markDirty();
+  setTimeout(() => {
+    if (previews[key]) {
+      delete previews[key];
+      markDirty();
+    }
+  }, duration);
 }
 
 function resizeCanvas() {
@@ -235,7 +284,7 @@ function resizeCanvas() {
   offsetX = canvas.width / 2;
   offsetY = canvas.height / 2;
 
-  drawGrid();
+  markDirty();
 }
 window.addEventListener("resize", resizeCanvas);
 
@@ -254,7 +303,7 @@ canvas.addEventListener("wheel", (e) => {
   offsetY = mouseY - ((mouseY - offsetY) / scale) * newScale;
 
   scale = newScale;
-  drawGrid();
+  markDirty();
 }, { passive: false });
 
 // --- Modal helpers ---
@@ -270,6 +319,11 @@ function closeUpgradeModal() {
   currentModalTile = null;
   if (upgradeModal) upgradeModal.classList.add("hidden");
 }
+
+// Hover rate-limiting
+let lastHoverRequestAt = 0;
+let lastHoverReqHex = null;
+const HOVER_REQUEST_MIN_MS = 150; // don't spam server more than ~6-7 req/s
 
 // --- Main flow ---
 (async function start() {
@@ -310,7 +364,7 @@ function closeUpgradeModal() {
         if (!currentModalTile) return;
         const { q, r} = currentModalTile;
         room.send("upgradeHex", { q, r, type: "city" });
-      });
+      })
 
     }
 
@@ -324,9 +378,10 @@ function closeUpgradeModal() {
       }
     });
 
-    room.onMessage("assignedColor", ({ color }) => { myColor = color; });
+    room.onMessage("assignedColor", ({ color }) => { myColor = color; markDirty(); });
 
     room.onMessage("history", (cells) => {
+      // update authoritative map, mark dirty; do NOT interrupt user interactions
       filled = {};
       (cells || []).forEach(c => {
         const q = c.q ?? c.x;
@@ -334,25 +389,27 @@ function closeUpgradeModal() {
         const key = `${q},${r}`;
         filled[key] = { color: c.color || "#0c0f1e", crown: !!c.crown, upgrade: c.upgrade || null };
       });
-      drawGrid();
+      markDirty();
     });
 
     // server authoritative update: paint/upgrade a tile
     room.onMessage("update", ({ q, r, color, crown, upgrade }) => {
       const key = `${q},${r}`;
+      // update authoritative filled map
       filled[key] = { color: color || "#0c0f1e", crown: !!crown, upgrade: upgrade || null };
       // clear any previews for this hex (e.g. an X) so we don't show overlays after success
       if (previews[key]) {
         delete previews[key];
       }
-      drawGrid();
+      // mark dirty for the render loop, do NOT call drawGrid directly
+      markDirty();
     });
 
     room.onMessage("hoverCost", ({ q, r, cost }) => {
       // Only show cost if this is the tile we’re hovering
       if (hoverHex && hoverHex.q === q && hoverHex.r === r) {
         hoverCost = cost;
-        drawGrid();
+        markDirty();
       }
     });
 
@@ -362,14 +419,14 @@ function closeUpgradeModal() {
         myPoints = points ?? myPoints;
         myTiles = tiles ?? myTiles;
         myMaxPoints = maxPoints ?? myMaxPoints;
-        drawGrid();
-        console.log(`DEBUG: pointsUpdate:`, myMaxPoints);
-      } else {
-        // optionally update others if you show them (not used for HUD right now)
+        markDirty();
       }
     });
 
-    room.onMessage("lobbyRoster", (list) => renderRoster(list));
+    room.onMessage("lobbyRoster", (list) => {
+      renderRoster(list);
+      // roster DOM update is small and non-blocking; no drawGrid call needed
+    });
 
     room.onMessage("lobbyStartTime", ({ ts }) => {
       lobbyStartTime = ts;
@@ -384,28 +441,16 @@ function closeUpgradeModal() {
       if (!ok) {
         if (reason === "insufficient") {
           // show a small ❌ overlay for 1s. do NOT mutate 'filled' - that's authoritative server state.
-          previews[key] = { type: "x" };
-          drawGrid();
-          setTimeout(() => {
-            if (previews[key]) {
-              delete previews[key];
-              drawGrid();
-            }
-          }, 1000);
+          showPreviewX(q, r, 1000);
         } else {
           // other reasons could be handled similarly
-          previews[key] = { type: "x" };
-          drawGrid();
-          setTimeout(() => {
-            delete previews[key];
-            drawGrid();
-          }, 800);
+          showPreviewX(q, r, 800);
         }
       } else {
         // ok === true: server might also broadcast "update" but clear preview just in case
         if (previews[key]) {
           delete previews[key];
-          drawGrid();
+          markDirty();
         }
       }
     });
@@ -443,6 +488,9 @@ function closeUpgradeModal() {
 
     resizeCanvas();
 
+    // Start the render loop (will draw initial state)
+    startRenderLoop();
+
     // --- Hover detection ---
     canvas.addEventListener("mousemove", (e) => {
       const rect = canvas.getBoundingClientRect();
@@ -451,17 +499,23 @@ function closeUpgradeModal() {
       const { q, r } = pixelToHex(localX, localY);
       hoverHex = { q, r };
 
-      if (room) {
-        room.send("requestHoverCost", { q, r });
+      // Rate-limited hover requests: only send when hex changed and at least HOVER_REQUEST_MIN_MS elapsed
+      const now = Date.now();
+      const hexKey = `${q},${r}`;
+      if (hexKey !== lastHoverReqHex && (now - lastHoverRequestAt) >= HOVER_REQUEST_MIN_MS) {
+        lastHoverReqHex = hexKey;
+        lastHoverRequestAt = now;
+        try { room.send("requestHoverCost", { q, r }); } catch (_) {}
       }
 
-      drawGrid();
+      // ask render loop to show hover immediately
+      markDirty();
     });
 
     canvas.addEventListener("mouseleave", () => {
       hoverHex = null;
       hoverCost = null;
-      drawGrid();
+      markDirty();
     });
 
     // --- Pointer-based drag & click handling ---
@@ -514,10 +568,10 @@ function closeUpgradeModal() {
         hadMoveDuringPointer = true;
 
         // DO NOT mutate 'filled' optimistically. Instead, send request to server and wait for authoritative "update".
-        if (room) {
-          room.send("fillHex", { q, r });
-        }
+        try { room.send("fillHex", { q, r }); } catch (_) {}
       }
+      // keep redraw active while dragging so visuals remain smooth
+      markDirty();
     }, { passive: true });
 
     canvas.addEventListener("pointerup", (e) => {
@@ -538,8 +592,8 @@ function closeUpgradeModal() {
         if (lobbyStartTime && nowTs <= lobbyStartTime + 5000 && !startChosen) {
           // choose starting tile (optimistic for start)
           filled[`${q},${r}`] = { color: myColor, crown: true };
-          drawGrid();
-          if (room) room.send("chooseStart", { q, r });
+          markDirty();
+          try { room.send("chooseStart", { q, r }); } catch (_) {}
           startChosen = true;
         } else {
           // adjacency check
@@ -554,7 +608,7 @@ function closeUpgradeModal() {
           if (!isAdjacent && ownedKeys.length > 0) {
             // ignore
           } else {
-            if (room) room.send("fillHex", { q, r });
+            try { room.send("fillHex", { q, r }); } catch (_) {}
           }
         }
       }
@@ -563,6 +617,7 @@ function closeUpgradeModal() {
       isDragging = false;
       hadMoveDuringPointer = false;
       lastSentHex = null;
+      markDirty();
     });
 
     // Timer

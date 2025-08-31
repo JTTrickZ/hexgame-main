@@ -1,9 +1,12 @@
 // rooms/GameRoom.js
 const colyseus = require("colyseus");
+const HEX_DIRS = [
+          {q: 1, r: 0}, {q: 1, r: -1}, {q: 0, r: -1},
+          {q: -1, r: 0}, {q: -1, r: 1}, {q: 0, r: 1},
+        ];
 
 //Constant Variables - Do Not REMOVE -------------------------------------
 const startdelay = 5000; // ms
-
 //
 const HEX_VALUE = 10;
 const HEX_MAINTCOST = 8;
@@ -23,6 +26,10 @@ const BASE_INCOME = 2;        // per turn or per tick income
 const UPGRADE_BANK_COST = 100;
 const UPGRADE_FORT_COST = 300;
 const UPGRADE_CITY_COST = 200;
+
+// Auto expansion params
+const AUTO_CAPTURE_THRESHOLD = 3;    // need >= 4 same-owner neighbors to capture
+const AUTO_EXPAND_INTERVAL = 10000;   // ms - how often expansion runs
 // ------------------------------------------------------------
 
 class GameRoom extends colyseus.Room {
@@ -46,21 +53,204 @@ class GameRoom extends colyseus.Room {
     this.playerTickInterval = null;
     this.lobbyStartTime = null;
 
+    // Auto expand interval handle
+    this.autoExpandInterval = null;
+
     this.onMessage("fillHex", (client, data) => this.handleFillHex(client, data));
     this.onMessage("chooseStart", (client, data) => this.handleChooseStart(client, data));
     this.onMessage("requestHoverCost", (client, data) => this.handleRequestHoverCost(client, data));
     this.onMessage("upgradeHex", (client, data) => this.handleUpgradeHex(client, data));
 
+    // start auto-expansion loop (runs regardless of players present; safe to run)
+    try {
+      this.startAutoExpand();
+    } catch (e) {
+      console.warn("Failed to start auto expand:", e);
+    }
+
     console.log(`🎮 GameRoom created: ${this.gameId}`);
   }
 
+  getNeighborCoords(q, r) {
+      return HEX_DIRS.map(d => ({ q: q + d.q, r: r + d.r }));
+  }
+
+  // --- Auto-expansion: scans nearby candidate cells and captures them when a single player
+  //     controls >= AUTO_CAPTURE_THRESHOLD of the 6 neighbors.
+  startAutoExpand() {
+    if (this.autoExpandInterval) clearInterval(this.autoExpandInterval);
+
+    this.autoExpandInterval = setInterval(() => {
+      try {
+        // Load all known hexes (this is the authoritative set)
+        const allHexes = this.db.getAllHexes(this.gameId) || [];
+
+        // Build a set of candidate coords to check:
+        // For each owned hex, consider its 6 neighbors as potential captures.
+        const candidateSet = new Set();
+        
+        allHexes.forEach(h => {
+          HEX_DIRS.forEach(d => {
+            const nq = h.q + d.q;
+            const nr = h.r + d.r;
+            candidateSet.add(`${nq},${nr}`);
+          });
+        });
+
+        // For performance: also consider hexes that are in DB but may be surrounded (so include allHexes)
+        allHexes.forEach(h => candidateSet.add(`${h.q},${h.r}`));
+
+        // evaluate each candidate
+        const toCapture = []; // array of { q, r, newOwnerId }
+        for (const key of candidateSet) {
+          const [qStr, rStr] = key.split(",");
+          const q = Number(qStr); const r = Number(rStr);
+
+          // count neighbor ownerships
+          const neighborOwners = {};
+          const neighbors = HEX_DIRS.map(d => ({ q: q + d.q, r: r + d.r }));
+          neighbors.forEach(n => {
+            const ox = this.db.getHexOwner(this.gameId, n.q, n.r);
+            if (ox && ox.playerId) {
+              neighborOwners[ox.playerId] = (neighborOwners[ox.playerId] || 0) + 1;
+            }
+          });
+
+          // find the player with the maximum neighbor count
+          let maxPlayer = null;
+          let maxCount = 0;
+          let tie = false;
+          Object.entries(neighborOwners).forEach(([pid, cnt]) => {
+            if (cnt > maxCount) {
+              maxCount = cnt;
+              maxPlayer = pid;
+              tie = false;
+            } else if (cnt === maxCount && cnt > 0) {
+              tie = true;
+            }
+          });
+
+          // only capture if a single player strictly has the max and meets threshold and no forts on the land
+          // only capture if a single player strictly has the max and meets threshold
+          if (maxPlayer && !tie && maxCount >= AUTO_CAPTURE_THRESHOLD) {
+            const occupied = this.db.getHexOwner(this.gameId, q, r);
+            const currentOwner = occupied?.playerId || null;
+
+            // 1. If tile already owned by maxPlayer, skip
+            if (currentOwner === maxPlayer) continue;
+
+            // 2. If tile is unclaimed, allow normal auto-expansion
+            let allowCapture = !currentOwner;
+
+            // 3. If tile is owned by another player:
+            if (currentOwner && currentOwner !== maxPlayer) {
+              // only allow capture if *all 6 neighbors* are owned by maxPlayer
+              const neighborsHexes = this.getNeighborCoords(q, r).map(n => this.db.getHexOwner(this.gameId, n.q, n.r));
+              const fullyEnclosed = neighborsHexes.every(n => n && n.playerId === maxPlayer);
+
+              if (fullyEnclosed) {
+                allowCapture = true;
+              } else {
+                allowCapture = false;
+              }
+            }
+
+            if (!allowCapture) continue;
+
+            // 4. Fort protection check (unchanged except scoped to opposing forts)
+            const neighborsHexes = this.getNeighborCoords(q, r).map(n => this.db.getHexOwner(this.gameId, n.q, n.r));
+
+            const fortProtected =
+              (occupied && occupied.upgrade === "fort" && currentOwner !== maxPlayer) ||
+              neighborsHexes.some(n => n && n.upgrade === "fort" && n.playerId !== maxPlayer);
+
+            if (fortProtected) continue;
+
+            // queue capture
+            toCapture.push({ q, r, attackerId: maxPlayer, prevOwnerId: currentOwner });
+          }
+        }
+
+        // apply captures
+        for (const cap of toCapture) {
+          const { q, r, attackerId, prevOwnerId } = cap;
+
+          // fetch player color (if we don't have it, fall back to DB player record)
+          // players map might not include someone (reconnects), so use DB stored color from any hex owned or players table
+          let attackerColor = this.players[attackerId]?.color;
+          if (!attackerColor) {
+            // try to find a hex owned by attacker to get color, or default color
+            const attackerHex = this.db.getAllHexes(this.gameId).find(h => h.playerId === attackerId);
+            attackerColor = attackerHex?.color || "#5865f2";
+          }
+
+          // Take a snapshot of the existing hex (to preserve upgrade via setHex)
+          const existingHex = this.db.getHexOwner(this.gameId, q, r);
+
+          // Transfer ownership (preserve any existing upgrade by calling setHex without upgrade argument)
+          this.db.setHex(this.gameId, q, r, attackerId, attackerColor);
+          // Log as click/history for auditability
+          this.db.saveClickToGame(this.gameId, attackerId, attackerColor, q, r);
+
+          // new authoritative hex
+          const newHex = this.db.getHexOwner(this.gameId, q, r);
+
+          // Broadcast tile change
+          this.broadcast("update", { q, r, color: attackerColor, upgrade: newHex.upgrade || null });
+
+          // Recalculate maxPoints for previous owner (if they lost a bank)
+          if (prevOwnerId && prevOwnerId !== attackerId) {
+            try {
+              const defenderRec = this.db.recalcMaxPoints(this.gameId, prevOwnerId);
+              const defenderTiles = this.db.getHexCountForPlayer(this.gameId, prevOwnerId);
+              this.broadcast("pointsUpdate", {
+                playerId: prevOwnerId,
+                points: defenderRec.points,
+                tiles: defenderTiles,
+                maxPoints: defenderRec.maxPoints
+              });
+            } catch (e) {
+              // ignore per-player recalc errors
+              console.warn("recalcMaxPoints failed for prevOwner:", prevOwnerId, e);
+            }
+          }
+
+          // Recalculate maxPoints for attacker (they may have gained a bank)
+          try {
+            const attackerRec = this.db.recalcMaxPoints(this.gameId, attackerId);
+            const attackerTiles = this.db.getHexCountForPlayer(this.gameId, attackerId);
+            this.broadcast("pointsUpdate", {
+              playerId: attackerId,
+              points: attackerRec.points,
+              tiles: attackerTiles,
+              maxPoints: attackerRec.maxPoints
+            });
+          } catch (e) {
+            // fallback: send current points row
+            const pp = this.db.getPlayerPoints(this.gameId, attackerId);
+            this.broadcast("pointsUpdate", {
+              playerId: attackerId,
+              points: pp.points,
+              tiles: this.db.getHexCountForPlayer(this.gameId, attackerId),
+              maxPoints: pp.maxPoints
+            });
+          }
+
+          // Optionally log server-side
+          console.log(`Auto-capture: ${attackerId} captured ${q},${r} (prevOwner=${prevOwnerId || 'none'})`);
+        }
+      } catch (err) {
+        console.error("AutoExpand error:", err);
+      }
+    }, AUTO_EXPAND_INTERVAL);
+  }
+
+  // computeCost unchanged
   computeCost(gameId, attackerPlayerId, q, r) {
     const occupied = this.db.getHexOwner(gameId, q, r);
     const upgradeCounts = this.db.getPlayerUpgradeCounts(gameId);
 
-    if (occupied && occupied.playerId === attackerPlayerId) {
-      return null; // cannot attack own hex
-    }
+    if (occupied && occupied.playerId === attackerPlayerId) return null;
 
     const attackerHexCount = this.db.getHexCountForPlayer(gameId, attackerPlayerId) || 0;
     const expansionCost = HEX_VALUE + Math.floor(EXP_GROWTH * Math.log2(attackerHexCount + 2));
@@ -70,30 +260,28 @@ class GameRoom extends colyseus.Room {
       const defPlayerId = occupied.playerId;
       const defenderHexCount = Math.max(1, this.db.getHexCountForPlayer(gameId, defPlayerId));
       const defenderPoints = (this.db.getPlayerPoints(gameId, defPlayerId)?.points) || 0;
-      const defenderForts = upgradeCounts[defPlayerId]?.forts || 0;
-      const attackerForts = upgradeCounts[attackerPlayerId]?.forts || 0;
       const defenderBanks = upgradeCounts[defPlayerId]?.banks || 0;
 
-      // Basic defender strength
-      let defenderStrength = (1 + (defenderPoints / defenderHexCount)) * (defenderHexCount * (HEX_VALUE + (0.5 * (defenderBanks + 1)))); 
+      let defenderStrength = (1 + defenderPoints / defenderHexCount) *
+                            (defenderHexCount * (HEX_VALUE + 0.5 * (defenderBanks + 1)));
 
-      // Multiply by defender's forts count (1+ to avoid zero)
-      defenderStrength *= ( 0.5 * (1 + defenderForts));
+      // --- Fort defense buff ---
+      const neighbors = this.getNeighborCoords(q, r);
+      const neighborHexes = neighbors.map(n => this.db.getHexOwner(gameId, n.q, n.r));
+      const touchingFort = (occupied.upgrade === "fort") ||
+                          neighborHexes.some(n => n && n.upgrade === "fort" && n.playerId === defPlayerId);
 
-      // Attack cost scales with strength
-      let attackCost = expansionCost + OCCUPIED_BASE + Math.floor(ATTACK_MULT * Math.sqrt(defenderStrength));
-
-      // If the targeted hex has a fort, multiply by 5
-      if (occupied.upgrade === "fort") {
-        attackCost *= 2;
+      if (touchingFort) {
+        defenderStrength *= 2; // fort aura buff
       }
 
-      // Always pick the higher cost
+      let attackCost = expansionCost + OCCUPIED_BASE + Math.floor(ATTACK_MULT * Math.sqrt(defenderStrength));
+
       cost = Math.max(cost, attackCost);
     }
 
     return cost;
-  }
+}
 
 
   handleRequestHoverCost(client, data) {
@@ -175,7 +363,6 @@ class GameRoom extends colyseus.Room {
     // Send this player's current points + maxPoints immediately
     try {
       const pr = this.db.getPlayerPoints(this.gameId, playerId);
-      console.log(`DEBUG: ${playerId} pointsUpdate:`, pr);
       client.send("pointsUpdate", {
         playerId,
         points: pr.points,
@@ -211,6 +398,10 @@ class GameRoom extends colyseus.Room {
 
     if (Object.keys(this.players).length === 0) {
       clearInterval(this.playerTickInterval);
+      if (this.autoExpandInterval) {
+        clearInterval(this.autoExpandInterval);
+        this.autoExpandInterval = null;
+      }
       this.db.closeGame(this.gameId);
       console.log(`🏁 GameRoom ${this.gameId} closed`);
     } else {
