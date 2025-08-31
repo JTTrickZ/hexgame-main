@@ -217,7 +217,7 @@ function drawGrid() {
       }
     }
   }
-  hudPoints.textContent = `Points: ${myPoints} / Max: ${myMaxPoints}`;
+  hudPoints.textContent = `Points: ;) ${myPoints} / Max: ${myMaxPoints} ;)`;
   hudTiles.textContent = `Tiles: ${myTiles}`;
 }
 
