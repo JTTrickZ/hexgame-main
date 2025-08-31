@@ -310,7 +310,7 @@ function closeUpgradeModal() {
         if (!currentModalTile) return;
         const { q, r} = currentModalTile;
         room.send("upgradeHex", { q, r, type: "city" });
-      })
+      });
 
     }
 
