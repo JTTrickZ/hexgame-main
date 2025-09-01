@@ -8,6 +8,12 @@ const db = new Database(dbPath);
 
 const now = () => Date.now();
 
+// Hex directions for mountain generation
+const HEX_DIRS = [
+  {q: 1, r: 0}, {q: 1, r: -1}, {q: 0, r: -1},
+  {q: -1, r: 0}, {q: -1, r: 1}, {q: 0, r: 1},
+];
+
 // --- Init schema ---
 db.exec(`
 CREATE TABLE IF NOT EXISTS players (
@@ -148,6 +154,7 @@ function createHexTable(gameId) {
       color TEXT,
       upgrade TEXT,
       upgrade_ts INTEGER,
+      terrain TEXT DEFAULT NULL,
       ts INTEGER,
       PRIMARY KEY (q, r)
     )
@@ -195,10 +202,27 @@ function setHexUpgrade(gameId, q, r, upgrade) {
   `).run(q, r, upgrade, now());
 }
 
+// Set terrain for a hex (mountains, etc.)
+function setHexTerrain(gameId, q, r, terrain) {
+  const table = createHexTable(gameId);
+  db.prepare(`
+    INSERT INTO ${table} (q, r, terrain)
+    VALUES (?, ?, ?)
+    ON CONFLICT(q, r) DO UPDATE SET
+      terrain=excluded.terrain
+  `).run(q, r, terrain);
+}
+
 // Get the upgrade for a specific hex
 function getHexUpgrade(gameId, q, r) {
   const hex = getHexOwner(gameId, q, r);
   return hex?.upgrade || null;
+}
+
+// Get the terrain for a specific hex
+function getHexTerrain(gameId, q, r) {
+  const hex = getHexOwner(gameId, q, r);
+  return hex?.terrain || null;
 }
 
 // Get all upgrades of a given type (or all if type is null)
@@ -215,10 +239,22 @@ function getAllUpgrades(gameId, type = null) {
     }));
 }
 
+// Get all terrain of a given type (or all if type is null)
+function getAllTerrain(gameId, type = null) {
+  const allHexes = getAllHexes(gameId);
+  return allHexes
+    .filter(h => h.terrain && (!type || h.terrain === type))
+    .map(h => ({
+      q: h.q,
+      r: h.r,
+      terrain: h.terrain
+    }));
+}
+
 function getAllHexes(gameId) {
   const table = safeHexTable(gameId);
   try {
-    return db.prepare(`SELECT q, r, playerId, color, upgrade, upgrade_ts, ts FROM ${table}`).all();
+    return db.prepare(`SELECT q, r, playerId, color, upgrade, upgrade_ts, terrain, ts FROM ${table}`).all();
   } catch {
     return [];
   }
@@ -227,7 +263,7 @@ function getAllHexes(gameId) {
 function getHexOwner(gameId, q, r) {
   const table = safeHexTable(gameId);
   try {
-    return db.prepare(`SELECT q, r, playerId, color, upgrade, upgrade_ts, ts FROM ${table} WHERE q = ? AND r = ?`).get(q, r);
+    return db.prepare(`SELECT q, r, playerId, color, upgrade, upgrade_ts, terrain, ts FROM ${table} WHERE q = ? AND r = ?`).get(q, r);
   } catch {
     return null;
   }
@@ -236,6 +272,68 @@ function getHexOwner(gameId, q, r) {
 function getHexCountForPlayer(gameId, playerId) {
   const hexes = getAllHexes(gameId);
   return hexes.filter(h => h.playerId === playerId).length;
+}
+
+// --- Mountain Generation Functions ---
+function generateMountainChains(gameId, numChains = 3, chainLength = 8, density = 0.15) {
+  const table = createHexTable(gameId);
+  const mountains = [];
+  
+  // Generate mountain chains
+  for (let chain = 0; chain < numChains; chain++) {
+    // Start at a random point within the grid
+    const startQ = Math.floor(Math.random() * 60) - 30;
+    const startR = Math.floor(Math.random() * 60) - 30;
+    
+    let currentQ = startQ;
+    let currentR = startR;
+    
+    for (let segment = 0; segment < chainLength; segment++) {
+      // Add some randomness to the chain direction
+      const direction = Math.floor(Math.random() * 6);
+      const { q: dq, r: dr } = HEX_DIRS[direction];
+      
+      currentQ += dq;
+      currentR += dr;
+      
+      // Add mountain at this position
+      mountains.push({ q: currentQ, r: currentR });
+      
+      // Sometimes branch out or add nearby mountains for more natural look
+      if (Math.random() < density) {
+        const branchDir = Math.floor(Math.random() * 6);
+        const { q: bq, r: br } = HEX_DIRS[branchDir];
+        mountains.push({ q: currentQ + bq, r: currentR + br });
+      }
+    }
+  }
+  
+  // Remove duplicates and save to database
+  const uniqueMountains = [];
+  const seen = new Set();
+  
+  mountains.forEach(m => {
+    const key = `${m.q},${m.r}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      uniqueMountains.push(m);
+      setHexTerrain(gameId, m.q, m.r, "mountain");
+    }
+  });
+  
+  console.log(`Generated ${uniqueMountains.length} mountain hexes for game ${gameId}`);
+  return uniqueMountains;
+}
+
+// Check if a hex is passable (not a mountain)
+function isHexPassable(gameId, q, r) {
+  const terrain = getHexTerrain(gameId, q, r);
+  return terrain !== "mountain";
+}
+
+// Get all mountain hexes for a game
+function getMountainHexes(gameId) {
+  return getAllTerrain(gameId, "mountain");
 }
 
 // ---------------- Game clicks (legacy history, keep) ----------------
@@ -391,5 +489,5 @@ module.exports = {
   addPlayerToLobby, removePlayerFromLobby, getLobbyPlayers,
   createGameTable, saveClickToGame, getClicksForGame, safePlayersTableName, safeTableName, createPlayersTable, initPlayerInGame,
   updatePlayerPoints, getPlayerPoints, getAllPlayersInGame, createHexTable, setHex, setHexUpgrade: setHexUpgrade, getAllHexes, getHexOwner, getHexCountForPlayer, createGameTables, getHexUpgrade,
-  getAllUpgrades, getPlayerUpgradeCounts, recalcMaxPoints
+  getAllUpgrades, getPlayerUpgradeCounts, recalcMaxPoints, generateMountainChains, isHexPassable, getMountainHexes, getAllTerrain, getHexTerrain
 };

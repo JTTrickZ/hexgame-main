@@ -30,6 +30,11 @@ const UPGRADE_CITY_COST = 200;
 // Auto expansion params
 const AUTO_CAPTURE_THRESHOLD = 3;    // need >= 4 same-owner neighbors to capture
 const AUTO_EXPAND_INTERVAL = 10000;   // ms - how often expansion runs
+
+// Mountain generation params
+const MOUNTAIN_CHAINS = 3;           // number of mountain chains to generate
+const MOUNTAIN_CHAIN_LENGTH = 8;     // length of each mountain chain
+const MOUNTAIN_DENSITY = 0.15;       // density of mountain branching
 // ------------------------------------------------------------
 
 class GameRoom extends colyseus.Room {
@@ -49,6 +54,13 @@ class GameRoom extends colyseus.Room {
 
     this.setState({ cells: [] });
     this.db.createGame(this.gameId);
+
+    // Generate mountain chains for this game
+    try {
+      this.db.generateMountainChains(this.gameId, MOUNTAIN_CHAINS, MOUNTAIN_CHAIN_LENGTH, MOUNTAIN_DENSITY);
+    } catch (e) {
+      console.warn("Failed to generate mountains:", e);
+    }
 
     this.playerTickInterval = null;
     this.lobbyStartTime = null;
@@ -139,32 +151,35 @@ class GameRoom extends colyseus.Room {
             // 1. If tile already owned by maxPlayer, skip
             if (currentOwner === maxPlayer) continue;
 
-            // 2. If tile is unclaimed, allow normal auto-expansion
-            let allowCapture = !currentOwner;
+                      // 2. If tile is unclaimed, allow normal auto-expansion
+          let allowCapture = !currentOwner;
 
-            // 3. If tile is owned by another player:
-            if (currentOwner && currentOwner !== maxPlayer) {
-              // only allow capture if *all 6 neighbors* are owned by maxPlayer
-              const neighborsHexes = this.getNeighborCoords(q, r).map(n => this.db.getHexOwner(this.gameId, n.q, n.r));
-              const fullyEnclosed = neighborsHexes.every(n => n && n.playerId === maxPlayer);
-
-              if (fullyEnclosed) {
-                allowCapture = true;
-              } else {
-                allowCapture = false;
-              }
-            }
-
-            if (!allowCapture) continue;
-
-            // 4. Fort protection check (unchanged except scoped to opposing forts)
+          // 3. If tile is owned by another player:
+          if (currentOwner && currentOwner !== maxPlayer) {
+            // only allow capture if *all 6 neighbors* are owned by maxPlayer
             const neighborsHexes = this.getNeighborCoords(q, r).map(n => this.db.getHexOwner(this.gameId, n.q, n.r));
+            const fullyEnclosed = neighborsHexes.every(n => n && n.playerId === maxPlayer);
 
-            const fortProtected =
-              (occupied && occupied.upgrade === "fort" && currentOwner !== maxPlayer) ||
-              neighborsHexes.some(n => n && n.upgrade === "fort" && n.playerId !== maxPlayer);
+            if (fullyEnclosed) {
+              allowCapture = true;
+            } else {
+              allowCapture = false;
+            }
+          }
 
-            if (fortProtected) continue;
+          if (!allowCapture) continue;
+
+          // 4. Fort protection check (unchanged except scoped to opposing forts)
+          const neighborsHexes = this.getNeighborCoords(q, r).map(n => this.db.getHexOwner(this.gameId, n.q, n.r));
+
+          const fortProtected =
+            (occupied && occupied.upgrade === "fort" && currentOwner !== maxPlayer) ||
+            neighborsHexes.some(n => n && n.upgrade === "fort" && n.playerId !== maxPlayer);
+
+          if (fortProtected) continue;
+
+          // 5. Mountain check - don't auto-expand into mountains
+          if (!this.db.isHexPassable(this.gameId, q, r)) continue;
 
             // queue capture
             toCapture.push({ q, r, attackerId: maxPlayer, prevOwnerId: currentOwner });
@@ -196,7 +211,7 @@ class GameRoom extends colyseus.Room {
           const newHex = this.db.getHexOwner(this.gameId, q, r);
 
           // Broadcast tile change
-          this.broadcast("update", { q, r, color: attackerColor, upgrade: newHex.upgrade || null });
+          this.broadcast("update", { q, r, color: attackerColor, upgrade: newHex.upgrade || null, terrain: newHex.terrain || null });
 
           // Recalculate maxPoints for previous owner (if they lost a bank)
           if (prevOwnerId && prevOwnerId !== attackerId) {
@@ -352,7 +367,8 @@ class GameRoom extends colyseus.Room {
         r: h.r,
         color: h.color,
         crown: startCoords.has(key),
-        upgrade: h.upgrade || null
+        upgrade: h.upgrade || null,
+        terrain: h.terrain || null
       };
     });
 
@@ -426,11 +442,17 @@ class GameRoom extends colyseus.Room {
     const q = Math.floor(data?.q ?? 0);
     const r = Math.floor(data?.r ?? 0);
 
+    // Check if hex is passable (not a mountain)
+    if (!this.db.isHexPassable(this.gameId, q, r)) {
+      client.send("fillResult", { q, r, ok: false, reason: "impassable" });
+      return;
+    }
+
     this.db.initPlayerInGame(this.gameId, playerId, q, r);
     this.db.setHex(this.gameId, q, r, playerId, player.color);
     this.db.saveClickToGame(this.gameId, playerId, player.color, q, r);
 
-    this.broadcast("update", { q, r, color: player.color, crown: true });
+    this.broadcast("update", { q, r, color: player.color, crown: true, terrain: this.db.getHexTerrain(this.gameId, q, r) || null });
     player.started = true;
 
     // send pointsUpdate including maxPoints
@@ -453,6 +475,12 @@ class GameRoom extends colyseus.Room {
     const r = Math.floor(data?.r ?? 0);
 
     try { this.db.createPlayersTable(this.gameId); } catch (e) {}
+
+    // Check if hex is passable (not a mountain)
+    if (!this.db.isHexPassable(this.gameId, q, r)) {
+      client.send("fillResult", { q, r, ok: false, reason: "impassable" });
+      return;
+    }
 
     const occupied = this.db.getHexOwner(this.gameId, q, r);
 
@@ -486,7 +514,7 @@ class GameRoom extends colyseus.Room {
     const hex = this.db.getHexOwner(this.gameId, q, r);
 
     // Broadcast tile change
-    this.broadcast("update", { q, r, color: player.color, upgrade: hex.upgrade || null });
+    this.broadcast("update", { q, r, color: player.color, upgrade: hex.upgrade || null, terrain: hex.terrain || null });
 
     // Recalculate maxPoints for previous owner (they may have lost a bank)
     if (prevOwnerId && prevOwnerId !== playerId) {
@@ -571,7 +599,7 @@ class GameRoom extends colyseus.Room {
     this.db.saveClickToGame(this.gameId, playerId, hex.color || this.players[playerId].color, q, r);
 
     // Broadcast hex update (clients will display emoji)
-    this.broadcast("update", { q, r, color: hex.color || this.players[playerId].color, upgrade: type });
+    this.broadcast("update", { q, r, color: hex.color || this.players[playerId].color, upgrade: type, terrain: hex.terrain || null });
 
     // Recalculate maxPoints for this player (buying a bank increases their cap)
     const rec = this.db.recalcMaxPoints(this.gameId, playerId);

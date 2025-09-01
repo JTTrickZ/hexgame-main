@@ -88,11 +88,13 @@ function drawHex(q, r, colorArg = "#0c0f1e", hover = false, cost = null) {
   let color = "#0c0f1e";
   let crown = false;
   let upgrade = null;
+  let terrain = null;
   if (typeof colorArg === "string") color = colorArg;
   else if (colorArg && typeof colorArg === "object") {
     color = colorArg.color || "#0c0f1e";
     crown = !!colorArg.crown;
     upgrade = colorArg.upgrade || null;
+    terrain = colorArg.terrain || null;
   }
 
   ctx.fillStyle = color;
@@ -127,6 +129,23 @@ function drawHex(q, r, colorArg = "#0c0f1e", hover = false, cost = null) {
     if (upgrade === "bank") emoji = "💰";
     if (upgrade === "fort") emoji = "🏰";
     if (upgrade === "city") emoji = "🏢";
+    ctx.strokeStyle = "rgba(0,0,0,0.8)";
+    ctx.lineWidth = Math.max(2, Math.round(fontSize / 6));
+    ctx.strokeText(emoji, cx, cy);
+    ctx.fillStyle = "#fff";
+    ctx.fillText(emoji, cx, cy);
+  }
+
+  // draw terrain emoji if present
+  if (terrain) {
+    const cx = offsetX + x * scale;
+    const cy = offsetY + y * scale;
+    const fontSize = Math.max(12, Math.round(HEX_SIZE * scale * 0.9));
+    ctx.font = `${fontSize}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    let emoji = "❓";
+    if (terrain === "mountain") emoji = "⛰️";
     ctx.strokeStyle = "rgba(0,0,0,0.8)";
     ctx.lineWidth = Math.max(2, Math.round(fontSize / 6));
     ctx.strokeText(emoji, cx, cy);
@@ -234,9 +253,10 @@ function drawGrid() {
       const cell = filled[key];
       const colorVal = (cell && (typeof cell === "object" ? cell.color : cell)) || "#0c0f1e";
       const upgradeVal = cell && cell.upgrade ? cell.upgrade : null;
+      const terrainVal = cell && cell.terrain ? cell.terrain : null;
       const crown = cell && cell.crown;
       const isHover = hoverHex && hoverHex.q === q && hoverHex.r === r;
-      drawHex(q, r, { color: colorVal, crown, upgrade: upgradeVal }, isHover, isHover ? hoverCost : null);
+      drawHex(q, r, { color: colorVal, crown, upgrade: upgradeVal, terrain: terrainVal }, isHover, isHover ? hoverCost : null);
 
       // draw preview overlays on top of the authoritative tile (without changing tile)
       const preview = previews[key];
@@ -254,6 +274,9 @@ function drawGrid() {
         if (preview.type === "x") {
           ctx.strokeText("❌", cx, cy);
           ctx.fillText("❌", cx, cy);
+        } else if (preview.type === "mountain") {
+          ctx.strokeText("⛰️", cx, cy);
+          ctx.fillText("⛰️", cx, cy);
         } else if (preview.type === "preview") {
           // optional different marker if you later add
           ctx.strokeText("•", cx, cy);
@@ -386,16 +409,16 @@ const HOVER_THROTTLE_MS = 150;
         const q = c.q ?? c.x;
         const r = c.r ?? c.y;
         const key = `${q},${r}`;
-        filled[key] = { color: c.color || "#0c0f1e", crown: !!c.crown, upgrade: c.upgrade || null };
+        filled[key] = { color: c.color || "#0c0f1e", crown: !!c.crown, upgrade: c.upgrade || null, terrain: c.terrain || null };
       });
       scheduleDraw();
     });
 
     // server authoritative update: paint/upgrade a tile
-    room.onMessage("update", ({ q, r, color, crown, upgrade }) => {
+    room.onMessage("update", ({ q, r, color, crown, upgrade, terrain }) => {
       const key = `${q},${r}`;
       // apply authoritative state
-      filled[key] = { color: color || "#0c0f1e", crown: !!crown, upgrade: upgrade || null };
+      filled[key] = { color: color || "#0c0f1e", crown: !!crown, upgrade: upgrade || null, terrain: terrain || null };
       // clear any previews for this hex (e.g. an X) so we don't show overlays after success
       if (previews[key]) {
         delete previews[key];
@@ -441,6 +464,16 @@ const HOVER_THROTTLE_MS = 150;
         if (reason === "insufficient") {
           // show a small ❌ overlay for 1s. do NOT mutate 'filled' - that's authoritative server state.
           previews[key] = { type: "x" };
+          scheduleDraw();
+          setTimeout(() => {
+            if (previews[key]) {
+              delete previews[key];
+              scheduleDraw();
+            }
+          }, 1000);
+        } else if (reason === "impassable") {
+          // show a mountain emoji overlay for 1s
+          previews[key] = { type: "mountain" };
           scheduleDraw();
           setTimeout(() => {
             if (previews[key]) {
