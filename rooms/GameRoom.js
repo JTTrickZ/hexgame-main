@@ -9,7 +9,7 @@ const HEX_DIRS = [
 const startdelay = 5000; // ms
 //
 const HEX_VALUE = 10;
-const HEX_MAINTCOST = 8;
+const HEX_MAINTCOST = 3;
 
 // Expansion          // baseline cost for first few tiles
 const EXP_GROWTH = 5;          // how fast expansion escalates (logarithmic)
@@ -606,12 +606,13 @@ class GameRoom extends colyseus.Room {
         points += BASE_INCOME;
 
         // 2) Income from owned hexes (value - maintenance)
-        const hexIncome = tiles * (HEX_VALUE - HEX_MAINTCOST);
-        points += hexIncome;
+        points += tiles;
+        const hexmaint = Math.floor(((tiles * HEX_MAINTCOST)/4));
+        points -= hexmaint;
 
         // 3) Extra income from CITIES (moved here from banks)
         //    Keep your old +10 per (now tied to city), or tweak as you like.
-        points += cities * 10;
+        points += cities * 5;
 
         // Banks DO NOT add income anymore; they only raise max points (via recalcMaxPoints)
 

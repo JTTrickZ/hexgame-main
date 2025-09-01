@@ -181,14 +181,52 @@ let hadMoveDuringPointer = false;
 let lastSentHex = null; // { q, r } last hex we sent to server in this drag session
 let pointerIdCaptured = null;
 
-// Rendering loop control
-let needsRedraw = true;
-let rafId = null;
-let lastFrameTs = 0;
-const FRAME_MIN_MS = 1000 / 20; // ~40 FPS cap to keep CPU reasonable
+// --- Rendering scheduler (non-blocking) ---
+let rafRequested = false;
+let dirty = false;
+let lastRenderTime = 0;
+const DRAG_RENDER_THROTTLE = 250; // ms: throttle redraws during drag to avoid interruption
 
+function markDirty() {
+  dirty = true;
+  if (!rafRequested) {
+    rafRequested = true;
+    requestAnimationFrame(renderIfNeeded);
+  }
+}
+
+function renderIfNeeded(ts) {
+  rafRequested = false;
+  const now = Date.now();
+
+  if (!dirty) {
+    // nothing to do
+    return;
+  }
+
+  // If user is dragging, throttle how often we actually perform a full redraw
+  if (isDragging) {
+    if (now - lastRenderTime < DRAG_RENDER_THROTTLE) {
+      // schedule a later attempt to draw (coalesce)
+      if (!rafRequested) {
+        rafRequested = true;
+        setTimeout(() => {
+          rafRequested = true;
+          requestAnimationFrame(renderIfNeeded);
+        }, DRAG_RENDER_THROTTLE - (now - lastRenderTime));
+      }
+      return;
+    }
+  }
+
+  // perform the actual draw
+  drawGrid();
+  lastRenderTime = now;
+  dirty = false;
+}
+
+// drawGrid remains the same but callers should call markDirty() instead of drawGrid()
 function drawGrid() {
-  // single responsibility: fully draw current keyboard state
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   for (let q = -GRID_RADIUS; q <= GRID_RADIUS; q++) {
     for (let r = Math.max(-GRID_RADIUS, -q - GRID_RADIUS); r <= Math.min(GRID_RADIUS, -q + GRID_RADIUS); r++) {
@@ -217,6 +255,7 @@ function drawGrid() {
           ctx.strokeText("❌", cx, cy);
           ctx.fillText("❌", cx, cy);
         } else if (preview.type === "preview") {
+          // optional different marker if you later add
           ctx.strokeText("•", cx, cy);
           ctx.fillText("•", cx, cy);
         }
@@ -227,47 +266,9 @@ function drawGrid() {
   hudTiles.textContent = `Tiles: ${myTiles}`;
 }
 
-// start/stop render loop
-function startRenderLoop() {
-  if (rafId) return;
-  rafId = requestAnimationFrame(renderLoop);
-}
-function stopRenderLoop() {
-  if (rafId) {
-    cancelAnimationFrame(rafId);
-    rafId = null;
-  }
-}
-function renderLoop(ts) {
-  // Throttle to FRAME_MIN_MS
-  if (!lastFrameTs) lastFrameTs = ts || performance.now();
-  const delta = (ts || performance.now()) - lastFrameTs;
-  if (delta >= FRAME_MIN_MS || needsRedraw || isDragging) {
-    drawGrid();
-    lastFrameTs = ts || performance.now();
-    needsRedraw = false;
-  }
-  rafId = requestAnimationFrame(renderLoop);
-}
-
-// mark dirty helper
-function markDirty() {
-  needsRedraw = true;
-  // ensure loop is running
-  startRenderLoop();
-}
-
-// small helper to set preview with auto-clear
-function showPreviewX(q, r, duration = 1000) {
-  const key = `${q},${r}`;
-  previews[key] = { type: "x" };
+// schedule a draw instead of immediate draw
+function scheduleDraw() {
   markDirty();
-  setTimeout(() => {
-    if (previews[key]) {
-      delete previews[key];
-      markDirty();
-    }
-  }, duration);
 }
 
 function resizeCanvas() {
@@ -284,7 +285,7 @@ function resizeCanvas() {
   offsetX = canvas.width / 2;
   offsetY = canvas.height / 2;
 
-  markDirty();
+  scheduleDraw();
 }
 window.addEventListener("resize", resizeCanvas);
 
@@ -303,7 +304,7 @@ canvas.addEventListener("wheel", (e) => {
   offsetY = mouseY - ((mouseY - offsetY) / scale) * newScale;
 
   scale = newScale;
-  markDirty();
+  scheduleDraw();
 }, { passive: false });
 
 // --- Modal helpers ---
@@ -320,10 +321,9 @@ function closeUpgradeModal() {
   if (upgradeModal) upgradeModal.classList.add("hidden");
 }
 
-// Hover rate-limiting
-let lastHoverRequestAt = 0;
-let lastHoverReqHex = null;
-const HOVER_REQUEST_MIN_MS = 150; // don't spam server more than ~6-7 req/s
+// Hover throttle — avoid spamming server
+let lastHoverSent = 0;
+const HOVER_THROTTLE_MS = 150;
 
 // --- Main flow ---
 (async function start() {
@@ -378,10 +378,9 @@ const HOVER_REQUEST_MIN_MS = 150; // don't spam server more than ~6-7 req/s
       }
     });
 
-    room.onMessage("assignedColor", ({ color }) => { myColor = color; markDirty(); });
+    room.onMessage("assignedColor", ({ color }) => { myColor = color; });
 
     room.onMessage("history", (cells) => {
-      // update authoritative map, mark dirty; do NOT interrupt user interactions
       filled = {};
       (cells || []).forEach(c => {
         const q = c.q ?? c.x;
@@ -389,27 +388,28 @@ const HOVER_REQUEST_MIN_MS = 150; // don't spam server more than ~6-7 req/s
         const key = `${q},${r}`;
         filled[key] = { color: c.color || "#0c0f1e", crown: !!c.crown, upgrade: c.upgrade || null };
       });
-      markDirty();
+      scheduleDraw();
     });
 
     // server authoritative update: paint/upgrade a tile
     room.onMessage("update", ({ q, r, color, crown, upgrade }) => {
       const key = `${q},${r}`;
-      // update authoritative filled map
+      // apply authoritative state
       filled[key] = { color: color || "#0c0f1e", crown: !!crown, upgrade: upgrade || null };
       // clear any previews for this hex (e.g. an X) so we don't show overlays after success
       if (previews[key]) {
         delete previews[key];
       }
-      // mark dirty for the render loop, do NOT call drawGrid directly
-      markDirty();
+
+      // If player is actively dragging, coalesce redraws (scheduleDraw handles throttling)
+      scheduleDraw();
     });
 
     room.onMessage("hoverCost", ({ q, r, cost }) => {
       // Only show cost if this is the tile we’re hovering
       if (hoverHex && hoverHex.q === q && hoverHex.r === r) {
         hoverCost = cost;
-        markDirty();
+        scheduleDraw();
       }
     });
 
@@ -419,14 +419,13 @@ const HOVER_REQUEST_MIN_MS = 150; // don't spam server more than ~6-7 req/s
         myPoints = points ?? myPoints;
         myTiles = tiles ?? myTiles;
         myMaxPoints = maxPoints ?? myMaxPoints;
-        markDirty();
+        scheduleDraw();
+      } else {
+        // optionally update others if you show them (not used for HUD right now)
       }
     });
 
-    room.onMessage("lobbyRoster", (list) => {
-      renderRoster(list);
-      // roster DOM update is small and non-blocking; no drawGrid call needed
-    });
+    room.onMessage("lobbyRoster", (list) => { renderRoster(list); scheduleDraw(); });
 
     room.onMessage("lobbyStartTime", ({ ts }) => {
       lobbyStartTime = ts;
@@ -441,16 +440,28 @@ const HOVER_REQUEST_MIN_MS = 150; // don't spam server more than ~6-7 req/s
       if (!ok) {
         if (reason === "insufficient") {
           // show a small ❌ overlay for 1s. do NOT mutate 'filled' - that's authoritative server state.
-          showPreviewX(q, r, 1000);
+          previews[key] = { type: "x" };
+          scheduleDraw();
+          setTimeout(() => {
+            if (previews[key]) {
+              delete previews[key];
+              scheduleDraw();
+            }
+          }, 1000);
         } else {
           // other reasons could be handled similarly
-          showPreviewX(q, r, 800);
+          previews[key] = { type: "x" };
+          scheduleDraw();
+          setTimeout(() => {
+            delete previews[key];
+            scheduleDraw();
+          }, 800);
         }
       } else {
         // ok === true: server might also broadcast "update" but clear preview just in case
         if (previews[key]) {
           delete previews[key];
-          markDirty();
+          scheduleDraw();
         }
       }
     });
@@ -488,9 +499,6 @@ const HOVER_REQUEST_MIN_MS = 150; // don't spam server more than ~6-7 req/s
 
     resizeCanvas();
 
-    // Start the render loop (will draw initial state)
-    startRenderLoop();
-
     // --- Hover detection ---
     canvas.addEventListener("mousemove", (e) => {
       const rect = canvas.getBoundingClientRect();
@@ -499,23 +507,22 @@ const HOVER_REQUEST_MIN_MS = 150; // don't spam server more than ~6-7 req/s
       const { q, r } = pixelToHex(localX, localY);
       hoverHex = { q, r };
 
-      // Rate-limited hover requests: only send when hex changed and at least HOVER_REQUEST_MIN_MS elapsed
+      // Only send hoverCost occasionally to avoid flooding server.
+      // Also don't send hover while dragging (it isn't useful then).
       const now = Date.now();
-      const hexKey = `${q},${r}`;
-      if (hexKey !== lastHoverReqHex && (now - lastHoverRequestAt) >= HOVER_REQUEST_MIN_MS) {
-        lastHoverReqHex = hexKey;
-        lastHoverRequestAt = now;
-        try { room.send("requestHoverCost", { q, r }); } catch (_) {}
+      if (!isDragging && room && (now - lastHoverSent) >= HOVER_THROTTLE_MS) {
+        lastHoverSent = now;
+        room.send("requestHoverCost", { q, r });
       }
 
-      // ask render loop to show hover immediately
-      markDirty();
+      // Visual hover update is cheap; schedule a draw
+      scheduleDraw();
     });
 
     canvas.addEventListener("mouseleave", () => {
       hoverHex = null;
       hoverCost = null;
-      markDirty();
+      scheduleDraw();
     });
 
     // --- Pointer-based drag & click handling ---
@@ -568,10 +575,14 @@ const HOVER_REQUEST_MIN_MS = 150; // don't spam server more than ~6-7 req/s
         hadMoveDuringPointer = true;
 
         // DO NOT mutate 'filled' optimistically. Instead, send request to server and wait for authoritative "update".
-        try { room.send("fillHex", { q, r }); } catch (_) {}
+        if (room) {
+          room.send("fillHex", { q, r });
+        }
       }
-      // keep redraw active while dragging so visuals remain smooth
-      markDirty();
+
+      // update hover coordinates for visuals (cheap)
+      hoverHex = { q, r };
+      scheduleDraw();
     }, { passive: true });
 
     canvas.addEventListener("pointerup", (e) => {
@@ -592,8 +603,8 @@ const HOVER_REQUEST_MIN_MS = 150; // don't spam server more than ~6-7 req/s
         if (lobbyStartTime && nowTs <= lobbyStartTime + 5000 && !startChosen) {
           // choose starting tile (optimistic for start)
           filled[`${q},${r}`] = { color: myColor, crown: true };
-          markDirty();
-          try { room.send("chooseStart", { q, r }); } catch (_) {}
+          scheduleDraw();
+          if (room) room.send("chooseStart", { q, r });
           startChosen = true;
         } else {
           // adjacency check
@@ -608,7 +619,7 @@ const HOVER_REQUEST_MIN_MS = 150; // don't spam server more than ~6-7 req/s
           if (!isAdjacent && ownedKeys.length > 0) {
             // ignore
           } else {
-            try { room.send("fillHex", { q, r }); } catch (_) {}
+            if (room) room.send("fillHex", { q, r });
           }
         }
       }
@@ -617,7 +628,9 @@ const HOVER_REQUEST_MIN_MS = 150; // don't spam server more than ~6-7 req/s
       isDragging = false;
       hadMoveDuringPointer = false;
       lastSentHex = null;
-      markDirty();
+
+      // ensure we redraw now that drag ended (so background updates applied during drag appear)
+      scheduleDraw();
     });
 
     // Timer
