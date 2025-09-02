@@ -41,6 +41,117 @@ let scale = 1;
 let minScale = 1;
 const maxScale = 3;
 
+// --- Client-side action queue and sync system ---
+const ACTION_SYNC_INTERVAL = 100; // ms - how often to sync actions to server
+const HOVER_SYNC_INTERVAL = 200; // ms - how often to sync hover requests
+const POINTS_SYNC_INTERVAL = 1000; // ms - how often to request points updates
+const OPTIMISTIC_TIMEOUT = 5000; // ms - how long to keep optimistic updates before clearing
+
+let actionQueue = []; // pending actions to send to server
+let lastActionSync = 0;
+let lastHoverSync = 0;
+let lastPointsSync = 0;
+let pendingHoverRequest = null; // { q, r } - most recent hover request
+let optimisticUpdates = {}; // { "q,r": { color, crown, upgrade, terrain, timestamp } } - client-side optimistic updates
+let serverState = {}; // { "q,r": { color, crown, upgrade, terrain } } - authoritative server state
+let optimisticTimeouts = {}; // { "q,r": timeoutId } - timeouts to clear stale optimistic updates
+
+// Sync actions to server periodically
+function syncActionsToServer() {
+  if (actionQueue.length === 0) return;
+  
+  const now = Date.now();
+  if (now - lastActionSync < ACTION_SYNC_INTERVAL) return;
+  
+  // Group actions by type for efficiency
+  const fillActions = actionQueue.filter(a => a.type === 'fillHex');
+  const upgradeActions = actionQueue.filter(a => a.type === 'upgradeHex');
+  const startActions = actionQueue.filter(a => a.type === 'chooseStart');
+  
+  // Send grouped actions
+  if (fillActions.length > 0) {
+    if (window.currentRoom) window.currentRoom.send("batchFillHex", { actions: fillActions.map(a => ({ q: a.q, r: a.r })) });
+  }
+  if (upgradeActions.length > 0) {
+    if (window.currentRoom) window.currentRoom.send("batchUpgradeHex", { actions: upgradeActions.map(a => ({ q: a.q, r: a.r, type: a.upgradeType })) });
+  }
+  if (startActions.length > 0) {
+    const startAction = startActions[0]; // Only one start action allowed
+    if (window.currentRoom) window.currentRoom.send("chooseStart", { q: startAction.q, r: startAction.r });
+  }
+  
+  // Clear processed actions
+  actionQueue = [];
+  lastActionSync = now;
+}
+
+// Sync hover requests to server periodically
+function syncHoverToServer() {
+  if (!pendingHoverRequest) return;
+  
+  const now = Date.now();
+  if (now - lastHoverSync < HOVER_SYNC_INTERVAL) return;
+  
+  if (window.currentRoom) window.currentRoom.send("requestHoverCost", pendingHoverRequest);
+  lastHoverSync = now;
+}
+
+// Request points updates periodically
+function requestPointsUpdate() {
+  const now = Date.now();
+  if (now - lastPointsSync < POINTS_SYNC_INTERVAL) return;
+  
+  if (window.currentRoom) window.currentRoom.send("requestPointsUpdate", { playerId });
+  lastPointsSync = now;
+}
+
+// Apply optimistic update to local state
+function applyOptimisticUpdate(q, r, color, crown = false, upgrade = null, terrain = null) {
+  const key = `${q},${r}`;
+  const now = Date.now();
+  
+  // Clear any existing timeout for this hex
+  if (optimisticTimeouts[key]) {
+    clearTimeout(optimisticTimeouts[key]);
+  }
+  
+  optimisticUpdates[key] = { color, crown, upgrade, terrain, timestamp: now };
+  
+  // Set timeout to clear stale optimistic update
+  optimisticTimeouts[key] = setTimeout(() => {
+    if (optimisticUpdates[key] && optimisticUpdates[key].timestamp === now) {
+      delete optimisticUpdates[key];
+      delete optimisticTimeouts[key];
+      markDirty();
+    }
+  }, OPTIMISTIC_TIMEOUT);
+  
+  markDirty();
+}
+
+// Merge optimistic and server state for rendering
+function getMergedState(q, r) {
+  const key = `${q},${r}`;
+  const optimistic = optimisticUpdates[key];
+  const server = serverState[key];
+  
+  // Prefer optimistic updates for immediate feedback, fall back to server state
+  return optimistic || server || null;
+}
+
+// Clear optimistic update when server confirms
+function clearOptimisticUpdate(q, r) {
+  const key = `${q},${r}`;
+  if (optimisticUpdates[key]) {
+    delete optimisticUpdates[key];
+    if (optimisticTimeouts[key]) {
+      clearTimeout(optimisticTimeouts[key]);
+      delete optimisticTimeouts[key];
+    }
+    markDirty();
+  }
+}
+
 function hexToPixel(q, r) {
   const x = HEX_SIZE * (SQRT3 * q + (SQRT3 / 2) * r);
   const y = HEX_SIZE * 1.5 * r;
@@ -178,7 +289,7 @@ function renderRoster(list) {
 }
 
 // Canvas + grid
-let filled = {};           // authoritative state from server: { "q,r": { color, crown, upgrade } }
+let filled = {};           // legacy - now using serverState and optimisticUpdates
 let previews = {};         // temporary overlays: { "q,r": { type: "x", expiresAt: ts } }
 let myColor = "#5865f2";
 let myPoints = 0;
@@ -205,6 +316,7 @@ let rafRequested = false;
 let dirty = false;
 let lastRenderTime = 0;
 const DRAG_RENDER_THROTTLE = 250; // ms: throttle redraws during drag to avoid interruption
+const MAX_OPTIMISTIC_UPDATES = 50; // maximum number of optimistic updates to prevent memory leaks
 
 function markDirty() {
   dirty = true;
@@ -238,6 +350,23 @@ function renderIfNeeded(ts) {
     }
   }
 
+  // Clean up excessive optimistic updates
+  const optimisticKeys = Object.keys(optimisticUpdates);
+  if (optimisticKeys.length > MAX_OPTIMISTIC_UPDATES) {
+    // Remove oldest optimistic updates
+    const sortedKeys = optimisticKeys.sort((a, b) => 
+      (optimisticUpdates[a].timestamp || 0) - (optimisticUpdates[b].timestamp || 0)
+    );
+    const toRemove = sortedKeys.slice(0, optimisticKeys.length - MAX_OPTIMISTIC_UPDATES);
+    toRemove.forEach(key => {
+      delete optimisticUpdates[key];
+      if (optimisticTimeouts[key]) {
+        clearTimeout(optimisticTimeouts[key]);
+        delete optimisticTimeouts[key];
+      }
+    });
+  }
+
   // perform the actual draw
   drawGrid();
   lastRenderTime = now;
@@ -250,7 +379,7 @@ function drawGrid() {
   for (let q = -GRID_RADIUS; q <= GRID_RADIUS; q++) {
     for (let r = Math.max(-GRID_RADIUS, -q - GRID_RADIUS); r <= Math.min(GRID_RADIUS, -q + GRID_RADIUS); r++) {
       const key = `${q},${r}`;
-      const cell = filled[key];
+      const cell = getMergedState(q, r);
       const colorVal = (cell && (typeof cell === "object" ? cell.color : cell)) || "#0c0f1e";
       const upgradeVal = cell && cell.upgrade ? cell.upgrade : null;
       const terrainVal = cell && cell.terrain ? cell.terrain : null;
@@ -359,6 +488,9 @@ const HOVER_THROTTLE_MS = 150;
 
   try {
     room = await client.joinById(roomId, { playerId, token });
+    
+    // Store room reference globally for sync functions
+    window.currentRoom = room;
 
     // now that room/join succeeded, look up modal elements (DOM should be loaded)
     upgradeModal = document.getElementById("upgradeModal");
@@ -372,23 +504,25 @@ const HOVER_THROTTLE_MS = 150;
       fortifyBtn.addEventListener("click", () => {
         if (!currentModalTile) return;
         const { q, r } = currentModalTile;
-        room.send("upgradeHex", { q, r, type: "fort" });
+        actionQueue.push({ type: 'upgradeHex', q, r, upgradeType: 'fort' });
+        closeUpgradeModal();
       });
     }
     if (incomeBtn) {
       incomeBtn.addEventListener("click", () => {
         if (!currentModalTile) return;
         const { q, r } = currentModalTile;
-        room.send("upgradeHex", { q, r, type: "bank" });
+        actionQueue.push({ type: 'upgradeHex', q, r, upgradeType: 'bank' });
+        closeUpgradeModal();
       });
     }
     if (cityBtn) {
       cityBtn.addEventListener("click", () => {
         if (!currentModalTile) return;
         const { q, r} = currentModalTile;
-        room.send("upgradeHex", { q, r, type: "city" });
+        actionQueue.push({ type: 'upgradeHex', q, r, upgradeType: 'city' });
+        closeUpgradeModal();
       })
-
     }
 
     if (closeModalBtn) closeModalBtn.addEventListener("click", () => closeUpgradeModal());
@@ -404,12 +538,12 @@ const HOVER_THROTTLE_MS = 150;
     room.onMessage("assignedColor", ({ color }) => { myColor = color; });
 
     room.onMessage("history", (cells) => {
-      filled = {};
+      serverState = {};
       (cells || []).forEach(c => {
         const q = c.q ?? c.x;
         const r = c.r ?? c.y;
         const key = `${q},${r}`;
-        filled[key] = { color: c.color || "#0c0f1e", crown: !!c.crown, upgrade: c.upgrade || null, terrain: c.terrain || null };
+        serverState[key] = { color: c.color || "#0c0f1e", crown: !!c.crown, upgrade: c.upgrade || null, terrain: c.terrain || null };
       });
       scheduleDraw();
     });
@@ -418,11 +552,13 @@ const HOVER_THROTTLE_MS = 150;
     room.onMessage("update", ({ q, r, color, crown, upgrade, terrain }) => {
       const key = `${q},${r}`;
       // apply authoritative state
-      filled[key] = { color: color || "#0c0f1e", crown: !!crown, upgrade: upgrade || null, terrain: terrain || null };
+      serverState[key] = { color: color || "#0c0f1e", crown: !!crown, upgrade: upgrade || null, terrain: terrain || null };
       // clear any previews for this hex (e.g. an X) so we don't show overlays after success
       if (previews[key]) {
         delete previews[key];
       }
+      // clear optimistic update since server confirmed
+      clearOptimisticUpdate(q, r);
 
       // If player is actively dragging, coalesce redraws (scheduleDraw handles throttling)
       scheduleDraw();
@@ -457,12 +593,84 @@ const HOVER_THROTTLE_MS = 150;
       countdownInterval = setInterval(updateCountdown, 500);
     });
 
-    // fill result: server tells us if fill failed (e.g. insufficient)
+    // Owned tile menu: open upgrade modal
+    room.onMessage("openOwnedTileMenu", ({ q, r, upgrade }) => {
+      // only allow opening if not in a drag session (deliberate click)
+      if (!isDragging && !hadMoveDuringPointer) {
+        openUpgradeModal(q, r, upgrade);
+      }
+    });
+
+    // upgrade result
+    room.onMessage("upgradeResult", (res) => {
+      if (!res) return;
+      if (res.ok) {
+        // server already broadcasted full 'update' and 'pointsUpdate'
+        closeUpgradeModal();
+      } else {
+        alert("Upgrade failed: " + (res.error || "unknown"));
+      }
+    });
+
+    // batch fill result
+    room.onMessage("batchFillResult", ({ results }) => {
+      (results || []).forEach(result => {
+        const { q, r, ok, reason } = result;
+        const key = `${q},${r}`;
+        if (!ok) {
+          if (reason === "insufficient") {
+            // show a small ❌ overlay for 1s. do NOT mutate server state - that's authoritative.
+            previews[key] = { type: "x" };
+            scheduleDraw();
+            setTimeout(() => {
+              if (previews[key]) {
+                delete previews[key];
+                scheduleDraw();
+              }
+            }, 1000);
+          } else if (reason === "impassable") {
+            // show a mountain emoji overlay for 1s
+            previews[key] = { type: "mountain" };
+            scheduleDraw();
+            setTimeout(() => {
+              if (previews[key]) {
+                delete previews[key];
+                scheduleDraw();
+              }
+            }, 1000);
+          } else {
+            // other reasons could be handled similarly
+            previews[key] = { type: "x" };
+            scheduleDraw();
+            setTimeout(() => {
+              delete previews[key];
+              scheduleDraw();
+            }, 800);
+          }
+        }
+        // Clear optimistic update regardless of success/failure
+        clearOptimisticUpdate(q, r);
+      });
+    });
+
+    // batch upgrade result
+    room.onMessage("batchUpgradeResult", ({ results }) => {
+      (results || []).forEach(result => {
+        const { q, r, ok, error } = result;
+        if (!ok) {
+          console.warn("Upgrade failed:", error);
+        }
+        // Clear optimistic update regardless of success/failure
+        clearOptimisticUpdate(q, r);
+      });
+    });
+
+    // Individual fill result (for clickHex messages)
     room.onMessage("fillResult", ({ q, r, ok, reason }) => {
       const key = `${q},${r}`;
       if (!ok) {
         if (reason === "insufficient") {
-          // show a small ❌ overlay for 1s. do NOT mutate 'filled' - that's authoritative server state.
+          // show a small ❌ overlay for 1s. do NOT mutate server state - that's authoritative.
           previews[key] = { type: "x" };
           scheduleDraw();
           setTimeout(() => {
@@ -481,6 +689,16 @@ const HOVER_THROTTLE_MS = 150;
               scheduleDraw();
             }
           }, 1000);
+        } else if (reason === "not_adjacent") {
+          // show a ❌ overlay for non-adjacent hexes
+          previews[key] = { type: "x" };
+          scheduleDraw();
+          setTimeout(() => {
+            if (previews[key]) {
+              delete previews[key];
+              scheduleDraw();
+            }
+          }, 1000);
         } else {
           // other reasons could be handled similarly
           previews[key] = { type: "x" };
@@ -490,32 +708,9 @@ const HOVER_THROTTLE_MS = 150;
             scheduleDraw();
           }, 800);
         }
-      } else {
-        // ok === true: server might also broadcast "update" but clear preview just in case
-        if (previews[key]) {
-          delete previews[key];
-          scheduleDraw();
-        }
       }
-    });
-
-    // Owned tile menu: open upgrade modal
-    room.onMessage("openOwnedTileMenu", ({ q, r, upgrade }) => {
-      // only allow opening if not in a drag session (deliberate click)
-      if (!isDragging && !hadMoveDuringPointer) {
-        openUpgradeModal(q, r, upgrade);
-      }
-    });
-
-    // upgrade result
-    room.onMessage("upgradeResult", (res) => {
-      if (!res) return;
-      if (res.ok) {
-        // server already broadcasted full 'update' and 'pointsUpdate'
-        closeUpgradeModal();
-      } else {
-        alert("Upgrade failed: " + (res.error || "unknown"));
-      }
+      // Clear optimistic update regardless of success/failure
+      clearOptimisticUpdate(q, r);
     });
 
     function updateCountdown() {
@@ -545,7 +740,7 @@ const HOVER_THROTTLE_MS = 150;
       const now = Date.now();
       if (!isDragging && room && (now - lastHoverSent) >= HOVER_THROTTLE_MS) {
         lastHoverSent = now;
-        room.send("requestHoverCost", { q, r });
+        pendingHoverRequest = { q, r };
       }
 
       // Visual hover update is cheap; schedule a draw
@@ -589,8 +784,8 @@ const HOVER_THROTTLE_MS = 150;
         }
 
         // adjacency check (same logic as click): don't allow painting if not adjacent and they already have tiles
-        const ownedKeys = Object.keys(filled).filter(k => {
-          const v = filled[k];
+        const ownedKeys = Object.keys(serverState).filter(k => {
+          const v = serverState[k];
           return (typeof v === "string" ? v : v.color) === myColor;
         });
         const isAdjacent = ownedKeys.length === 0 || ownedKeys.some(k => {
@@ -607,10 +802,11 @@ const HOVER_THROTTLE_MS = 150;
         lastSentHex = { q, r };
         hadMoveDuringPointer = true;
 
-        // DO NOT mutate 'filled' optimistically. Instead, send request to server and wait for authoritative "update".
-        if (room) {
-          room.send("fillHex", { q, r });
-        }
+        // Apply optimistic update for immediate feedback
+        applyOptimisticUpdate(q, r, myColor);
+        
+        // Queue action for periodic sync instead of immediate send
+        actionQueue.push({ type: 'fillHex', q, r });
       }
 
       // update hover coordinates for visuals (cheap)
@@ -635,25 +831,13 @@ const HOVER_THROTTLE_MS = 150;
         const nowTs = Date.now();
         if (lobbyStartTime && nowTs <= lobbyStartTime + 5000 && !startChosen) {
           // choose starting tile (optimistic for start)
-          filled[`${q},${r}`] = { color: myColor, crown: true };
+          applyOptimisticUpdate(q, r, myColor, true);
           scheduleDraw();
-          if (room) room.send("chooseStart", { q, r });
+          actionQueue.push({ type: 'chooseStart', q, r });
           startChosen = true;
         } else {
-          // adjacency check
-          const ownedKeys = Object.keys(filled).filter(k => {
-            const v = filled[k];
-            return (typeof v === "string" ? v : v.color) === myColor;
-          });
-          const isAdjacent = ownedKeys.length === 0 || ownedKeys.some(k => {
-            const [oq, or] = k.split(",").map(Number);
-            return getNeighbors(oq, or).some(n => n.q === q && n.r === r);
-          });
-          if (!isAdjacent && ownedKeys.length > 0) {
-            // ignore
-          } else {
-            if (room) room.send("fillHex", { q, r });
-          }
+          // For deliberate clicks, send individual message to handle modal opening
+          if (window.currentRoom) window.currentRoom.send("clickHex", { q, r });
         }
       }
 
@@ -674,6 +858,13 @@ const HOVER_THROTTLE_MS = 150;
       const secs = elapsed % 60;
       hudTime.textContent = `Time: ${mins}:${secs.toString().padStart(2, "0")}`;
     }, 1000);
+
+    // Start periodic sync loop after room is fully initialized
+    setInterval(() => {
+      syncActionsToServer();
+      syncHoverToServer();
+      requestPointsUpdate();
+    }, 100); // Run sync checks every 50ms
 
   } catch (e) {
     console.error("Failed to join game room:", e);

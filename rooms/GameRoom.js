@@ -72,6 +72,10 @@ class GameRoom extends colyseus.Room {
     this.onMessage("chooseStart", (client, data) => this.handleChooseStart(client, data));
     this.onMessage("requestHoverCost", (client, data) => this.handleRequestHoverCost(client, data));
     this.onMessage("upgradeHex", (client, data) => this.handleUpgradeHex(client, data));
+    this.onMessage("batchFillHex", (client, data) => this.handleBatchFillHex(client, data));
+    this.onMessage("batchUpgradeHex", (client, data) => this.handleBatchUpgradeHex(client, data));
+    this.onMessage("requestPointsUpdate", (client, data) => this.handleRequestPointsUpdate(client, data));
+    this.onMessage("clickHex", (client, data) => this.handleClickHex(client, data));
 
     // start auto-expansion loop (runs regardless of players present; safe to run)
     try {
@@ -668,6 +672,303 @@ class GameRoom extends colyseus.Room {
 
   getPlayerIdBySession(sessionId) {
     return Object.keys(this.players).find(pid => this.players[pid].sessionId === sessionId);
+  }
+
+  // Batch handlers for efficient client-server communication
+  handleBatchFillHex(client, data) {
+    const playerId = this.getPlayerIdBySession(client.sessionId);
+    if (!playerId) return;
+    const player = this.players[playerId];
+    if (!player || !player.started) return;
+
+    const actions = data?.actions || [];
+    const results = [];
+
+    for (const action of actions) {
+      const q = Math.floor(action?.q ?? 0);
+      const r = Math.floor(action?.r ?? 0);
+
+      try { this.db.createPlayersTable(this.gameId); } catch (e) {}
+
+      // Check if hex is passable (not a mountain)
+      if (!this.db.isHexPassable(this.gameId, q, r)) {
+        results.push({ q, r, ok: false, reason: "impassable" });
+        continue;
+      }
+
+      const occupied = this.db.getHexOwner(this.gameId, q, r);
+
+      // If already owned by this player, skip (no action needed)
+      if (occupied && occupied.playerId === playerId) {
+        // Send openOwnedTileMenu for individual clicks (not batch)
+        client.send("openOwnedTileMenu", { q, r, upgrade: occupied.upgrade || null });
+        continue;
+      }
+
+      const currentPoints = this.db.getPlayerPoints(this.gameId, playerId).points;
+      const cost = this.computeCost(this.gameId, playerId, q, r);
+
+      if (cost === null || currentPoints < cost) {
+        results.push({ q, r, ok: false, reason: "insufficient" });
+        continue;
+      }
+
+      // Adjacency check: don't allow painting if not adjacent and they already have tiles
+      const ownedHexes = this.db.getAllHexes(this.gameId).filter(h => h.playerId === playerId);
+      const isAdjacent = ownedHexes.length === 0 || ownedHexes.some(h => {
+        const neighbors = this.getNeighborCoords(h.q, h.r);
+        return neighbors.some(n => n.q === q && n.r === r);
+      });
+
+      if (!isAdjacent && ownedHexes.length > 0) {
+        results.push({ q, r, ok: false, reason: "not_adjacent" });
+        continue;
+      }
+
+      // Deduct points (this will clamp to current maxPoints)
+      this.db.updatePlayerPoints(this.gameId, playerId, currentPoints - cost);
+
+      // Remember previous owner for max recalculation after capture
+      const prevOwnerId = occupied && occupied.playerId ? occupied.playerId : null;
+
+      // Transfer ownership (preserve existing upgrade column)
+      this.db.setHex(this.gameId, q, r, playerId, player.color);
+      this.db.saveClickToGame(this.gameId, playerId, player.color, q, r);
+      
+      console.log(`Player ${playerId} spent ${cost}, attempted capture at ${q},${r}`);
+
+      // Server authoritative hex state after change
+      const hex = this.db.getHexOwner(this.gameId, q, r);
+
+      // Broadcast tile change
+      this.broadcast("update", { q, r, color: player.color, upgrade: hex.upgrade || null, terrain: hex.terrain || null });
+
+      // Recalculate maxPoints for previous owner (they may have lost a bank)
+      if (prevOwnerId && prevOwnerId !== playerId) {
+        try {
+          const defenderRec = this.db.recalcMaxPoints(this.gameId, prevOwnerId);
+          const defenderTiles = this.db.getHexCountForPlayer(this.gameId, prevOwnerId);
+          this.broadcast("pointsUpdate", {
+            playerId: prevOwnerId,
+            points: defenderRec.points,
+            tiles: defenderTiles,
+            maxPoints: defenderRec.maxPoints
+          });
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      results.push({ q, r, ok: true });
+    }
+
+    // Recalculate maxPoints for attacker (they may have gained a bank from captured tiles)
+    try {
+      const attackerRec = this.db.recalcMaxPoints(this.gameId, playerId);
+      const tiles = this.db.getHexCountForPlayer(this.gameId, playerId);
+      this.broadcast("pointsUpdate", {
+        playerId,
+        points: attackerRec.points,
+        tiles,
+        maxPoints: attackerRec.maxPoints
+      });
+    } catch (e) {
+      // fallback: broadcast current points
+      const pp = this.db.getPlayerPoints(this.gameId, playerId);
+      this.broadcast("pointsUpdate", {
+        playerId,
+        points: pp.points,
+        tiles: this.db.getHexCountForPlayer(this.gameId, playerId),
+        maxPoints: pp.maxPoints
+      });
+    }
+
+    // Send batch results back to client
+    client.send("batchFillResult", { results });
+  }
+
+  handleBatchUpgradeHex(client, data) {
+    const playerId = this.getPlayerIdBySession(client.sessionId);
+    if (!playerId) return;
+
+    const actions = data?.actions || [];
+    const results = [];
+
+    for (const action of actions) {
+      const type = typeof action?.type === "string" ? action.type : null;
+      const q = Math.floor(action?.q ?? 0);
+      const r = Math.floor(action?.r ?? 0);
+
+      if (!type || (type !== "bank" && type !== "fort" && type !== "city")) {
+        results.push({ q, r, ok: false, error: "invalid upgrade" });
+        continue;
+      }
+
+      // confirm owner
+      const hex = this.db.getHexOwner(this.gameId, q, r);
+      if (!hex || hex.playerId !== playerId) {
+        results.push({ q, r, ok: false, error: "not owner" });
+        continue;
+      }
+
+      // cost check
+      const row = this.db.getPlayerPoints(this.gameId, playerId);
+      const currentPoints = row?.points ?? 0;
+      let cost = 0;
+      if (type === "bank") cost = UPGRADE_BANK_COST;
+      else if (type === "fort") cost = UPGRADE_FORT_COST;
+      else if (type === "city") cost = UPGRADE_CITY_COST;
+
+      if (currentPoints < cost) {
+        results.push({ q, r, ok: false, error: "insufficient" });
+        continue;
+      }
+
+      // Deduct points and persist upgrade
+      const newPoints = currentPoints - cost;
+      this.db.updatePlayerPoints(this.gameId, playerId, newPoints);
+
+      // Set the upgrade on the hex (this will record upgrade_ts)
+      this.db.setHexUpgrade(this.gameId, q, r, type);
+
+      // optionally log as a click/history event as well
+      this.db.saveClickToGame(this.gameId, playerId, hex.color || this.players[playerId].color, q, r);
+
+      // Broadcast hex update (clients will display emoji)
+      this.broadcast("update", { q, r, color: hex.color || this.players[playerId].color, upgrade: type, terrain: hex.terrain || null });
+
+      results.push({ q, r, ok: true, type });
+    }
+
+    // Recalculate maxPoints for this player (buying banks increases their cap)
+    const rec = this.db.recalcMaxPoints(this.gameId, playerId);
+    const tiles = this.db.getHexCountForPlayer(this.gameId, playerId);
+
+    // Broadcast points update to everyone (with updated maxPoints)
+    this.broadcast("pointsUpdate", { playerId, points: rec.points, tiles, maxPoints: rec.maxPoints });
+
+    // Send batch results back to client
+    client.send("batchUpgradeResult", { results });
+  }
+
+  handleRequestPointsUpdate(client, data) {
+    const playerId = this.getPlayerIdBySession(client.sessionId);
+    if (!playerId) return;
+
+    try {
+      const pr = this.db.getPlayerPoints(this.gameId, playerId);
+      client.send("pointsUpdate", {
+        playerId,
+        points: pr.points,
+        tiles: this.db.getHexCountForPlayer(this.gameId, playerId),
+        maxPoints: pr.maxPoints
+      });
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // Handle individual hex clicks (for modal opening)
+  handleClickHex(client, data) {
+    const playerId = this.getPlayerIdBySession(client.sessionId);
+    if (!playerId) return;
+    const player = this.players[playerId];
+    if (!player || !player.started) return;
+
+    const q = Math.floor(data?.q ?? 0);
+    const r = Math.floor(data?.r ?? 0);
+
+    try { this.db.createPlayersTable(this.gameId); } catch (e) {}
+
+    // Check if hex is passable (not a mountain)
+    if (!this.db.isHexPassable(this.gameId, q, r)) {
+      client.send("fillResult", { q, r, ok: false, reason: "impassable" });
+      return;
+    }
+
+    const occupied = this.db.getHexOwner(this.gameId, q, r);
+
+    // If already owned by this player, open owner menu (client shows modal)
+    if (occupied && occupied.playerId === playerId) {
+      client.send("openOwnedTileMenu", { q, r, upgrade: occupied.upgrade || null });
+      return;
+    }
+
+    // For non-owned tiles, proceed with normal fill logic
+    const currentPoints = this.db.getPlayerPoints(this.gameId, playerId).points;
+    const cost = this.computeCost(this.gameId, playerId, q, r);
+
+    if (cost === null || currentPoints < cost) {
+      client.send("fillResult", { q, r, ok: false, reason: "insufficient" });
+      return;
+    }
+
+    // Adjacency check: don't allow painting if not adjacent and they already have tiles
+    const ownedHexes = this.db.getAllHexes(this.gameId).filter(h => h.playerId === playerId);
+    const isAdjacent = ownedHexes.length === 0 || ownedHexes.some(h => {
+      const neighbors = this.getNeighborCoords(h.q, h.r);
+      return neighbors.some(n => n.q === q && n.r === r);
+    });
+
+    if (!isAdjacent && ownedHexes.length > 0) {
+      client.send("fillResult", { q, r, ok: false, reason: "not_adjacent" });
+      return;
+    }
+
+    // Deduct points (this will clamp to current maxPoints)
+    this.db.updatePlayerPoints(this.gameId, playerId, currentPoints - cost);
+
+    // Remember previous owner for max recalculation after capture
+    const prevOwnerId = occupied && occupied.playerId ? occupied.playerId : null;
+
+    // Transfer ownership (preserve existing upgrade column)
+    this.db.setHex(this.gameId, q, r, playerId, player.color);
+    this.db.saveClickToGame(this.gameId, playerId, player.color, q, r);
+    
+    console.log(`Player ${playerId} spent ${cost}, attempted capture at ${q},${r}`);
+
+    // Server authoritative hex state after change
+    const hex = this.db.getHexOwner(this.gameId, q, r);
+
+    // Broadcast tile change
+    this.broadcast("update", { q, r, color: player.color, upgrade: hex.upgrade || null, terrain: hex.terrain || null });
+
+    // Recalculate maxPoints for previous owner (they may have lost a bank)
+    if (prevOwnerId && prevOwnerId !== playerId) {
+      try {
+        const defenderRec = this.db.recalcMaxPoints(this.gameId, prevOwnerId);
+        const defenderTiles = this.db.getHexCountForPlayer(this.gameId, prevOwnerId);
+        this.broadcast("pointsUpdate", {
+          playerId: prevOwnerId,
+          points: defenderRec.points,
+          tiles: defenderTiles,
+          maxPoints: defenderRec.maxPoints
+        });
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // Recalculate maxPoints for attacker (they may have gained a bank from the captured tile)
+    try {
+      const attackerRec = this.db.recalcMaxPoints(this.gameId, playerId);
+      const tiles = this.db.getHexCountForPlayer(this.gameId, playerId);
+      this.broadcast("pointsUpdate", {
+        playerId,
+        points: attackerRec.points,
+        tiles,
+        maxPoints: attackerRec.maxPoints
+      });
+    } catch (e) {
+      // fallback: broadcast current points
+      const pp = this.db.getPlayerPoints(this.gameId, playerId);
+      this.broadcast("pointsUpdate", {
+        playerId,
+        points: pp.points,
+        tiles: this.db.getHexCountForPlayer(this.gameId, playerId),
+        maxPoints: pp.maxPoints
+      });
+    }
   }
 }
 
