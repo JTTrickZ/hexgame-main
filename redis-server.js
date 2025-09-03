@@ -17,6 +17,7 @@ const { RedisReplayRoom } = require("./rooms/RedisReplayRoom");
 
 // Redis Data Layer
 const GameData = require("./redis/GameData");
+const RedisManager = require("./redis/RedisManager");
 const config = require("./config");
 
 // --- Express ---
@@ -69,39 +70,42 @@ app.post("/api/register", async (req, res) => {
     const gameData = new GameData();
 
     // Check if player exists by username (simplified - in production you'd want a username index)
-    const existingPlayers = await gameData.redis.zrange('players:active', 0, -1);
-    let existingPlayer = null;
-    
-    for (const playerId of existingPlayers) {
-      const player = await gameData.getPlayer(playerId);
-      if (player && player.username === clean) {
-        existingPlayer = player;
-        break;
+    const redis = await gameData.getRedis();
+    try {
+      const existingPlayers = await redis.zrange('players:active', 0, -1);
+      let existingPlayer = null;
+      
+      for (const playerId of existingPlayers) {
+        const player = await gameData.getPlayer(playerId);
+        if (player && player.username === clean) {
+          existingPlayer = player;
+          break;
+        }
       }
-    }
 
-    if (!existingPlayer) {
-      const playerId = await gameData.createPlayer(clean);
-      const token = signPlayerId(playerId);
-      const player = await gameData.getPlayer(playerId);
-      await gameData.disconnect();
-      return res.json({ 
-        playerId, 
-        token, 
-        username: clean,
-        color: player.color
-      });
-    } else {
-      // Update last seen
-      await gameData.redis.hset(`player:${existingPlayer.id}`, 'lastSeen', Date.now());
-      const token = signPlayerId(existingPlayer.id);
-      await gameData.disconnect();
-      return res.json({ 
-        playerId: existingPlayer.id, 
-        token, 
-        username: existingPlayer.username, 
-        color: existingPlayer.color 
-      });
+      if (!existingPlayer) {
+        const playerId = await gameData.createPlayer(clean);
+        const token = signPlayerId(playerId);
+        const player = await gameData.getPlayer(playerId);
+        return res.json({ 
+          playerId, 
+          token, 
+          username: clean,
+          color: player.color
+        });
+      } else {
+        // Update last seen
+        await redis.hset(`player:${existingPlayer.id}`, 'lastSeen', Date.now());
+        const token = signPlayerId(existingPlayer.id);
+        return res.json({ 
+          playerId: existingPlayer.id, 
+          token, 
+          username: existingPlayer.username, 
+          color: existingPlayer.color 
+        });
+      }
+    } finally {
+      gameData.returnRedis(redis);
     }
   } catch (e) {
     console.error("register error:", e);
@@ -174,14 +178,9 @@ const server = http.createServer(app);
 // Create Redis driver for Colyseus
 const redisDriver = new RedisDriver(config.redis);
 
-// Add error handling for Redis driver
-redisDriver.on('error', (error) => {
-  console.error('Redis driver error:', error);
-});
-
-redisDriver.on('connect', () => {
-  console.log('✅ Redis driver connected successfully');
-});
+// Create Redis presence adapter
+const RedisPresence = require('@colyseus/redis-presence').RedisPresence;
+const presence = new RedisPresence(config.redis);
 
 const gameServer = new Server({
   transport: new WebSocketTransport({ 
@@ -192,6 +191,7 @@ const gameServer = new Server({
     maxPayloadLength: config.colyseus.server.maxPayloadLength,
   }),
   driver: redisDriver,
+  presence: presence,
   // Server-level settings for Cloudflare and Docker
   server: {
     healthCheckInterval: config.colyseus.server.healthCheckInterval,
@@ -207,32 +207,191 @@ gameServer.define("redisLobby", RedisLobbyRoom, { verifyPlayer: verifyPlayerId }
 gameServer.define("redisGame", RedisGameRoom, { verifyPlayer: verifyPlayerId });
 gameServer.define("redisReplay", RedisReplayRoom, { verifyPlayer: verifyPlayerId });
 
-// Test Redis connection on startup
-const gameData = new GameData();
-gameData.testConnection().then(success => {
-  if (success) {
-    console.log('✅ Redis connection verified on startup');
-  } else {
-    console.error('❌ Redis connection failed on startup - check network connectivity');
+// Clean up stale Colyseus entries at startup
+async function cleanupStaleEntries() {
+  try {
+    const redis = new (require('ioredis'))(config.redis);
+    
+    console.log('🧹 Starting cleanup of stale entries...');
+    
+    // Clean up ALL Colyseus-related keys first
+    try {
+      const allColyseusKeys = await redis.keys('colyseus:*');
+      if (allColyseusKeys.length > 0) {
+        console.log(`🧹 Cleaning up ${allColyseusKeys.length} Colyseus keys...`);
+        await redis.del(...allColyseusKeys);
+        console.log('✅ Cleaned up all Colyseus keys');
+      }
+    } catch (error) {
+      console.log('ℹ️ No Colyseus keys found');
+    }
+    
+    // Clean up stale process registrations
+    try {
+      const nodes = await redis.hgetall('colyseus:nodes');
+      if (nodes && Object.keys(nodes).length > 0) {
+        console.log('🧹 Cleaning up stale process registrations...');
+        await redis.del('colyseus:nodes');
+        console.log('✅ Cleaned up stale process registrations');
+      }
+    } catch (error) {
+      console.log('ℹ️ No stale process registrations found');
+    }
+    
+    // Clean up stale room caches
+    try {
+      const roomCaches = await redis.get('roomcaches');
+      if (roomCaches) {
+        console.log('🧹 Cleaning up stale room caches...');
+        await redis.del('roomcaches');
+        console.log('✅ Cleaned up stale room caches');
+      }
+    } catch (error) {
+      console.log('ℹ️ No stale room caches found');
+    }
+    
+    // Clean up any other stale Colyseus keys (double-check)
+    try {
+      const staleKeys = await redis.keys('colyseus:*');
+      if (staleKeys.length > 0) {
+        console.log('🧹 Final cleanup of remaining Colyseus keys...');
+        await redis.del(...staleKeys);
+        console.log(`✅ Cleaned up ${staleKeys.length} remaining Colyseus keys`);
+      }
+    } catch (error) {
+      console.log('ℹ️ No remaining Colyseus keys found');
+    }
+    
+    await redis.disconnect();
+    console.log('✅ Cleanup completed successfully');
+  } catch (error) {
+    console.error('❌ Error during cleanup:', error);
+    throw error; // Re-throw to prevent server from starting with cleanup errors
   }
-  gameData.disconnect();
+}
+
+// Initialize server with cleanup
+async function initializeServer() {
+  try {
+    // Test Redis connection first using the manager
+    const connectionSuccess = await RedisManager.testConnection();
+    if (connectionSuccess) {
+      console.log('✅ Redis connection verified on startup');
+    } else {
+      console.error('❌ Redis connection failed on startup - check network connectivity');
+      process.exit(1);
+    }
+    
+    // Clean up stale entries BEFORE starting server
+    await cleanupStaleEntries();
+    
+    // Additional cleanup to prevent health check loops
+    const redis = new (require('ioredis'))(config.redis);
+    try {
+      // Force cleanup of any remaining process registrations
+      await redis.del('colyseus:nodes');
+      await redis.del('roomcaches');
+      const remainingKeys = await redis.keys('colyseus:*');
+      if (remainingKeys.length > 0) {
+        await redis.del(...remainingKeys);
+        console.log(`🧹 Force cleaned ${remainingKeys.length} remaining keys`);
+      }
+    } finally {
+      await redis.disconnect();
+    }
+    
+    // Start the server after cleanup is complete
+    server.listen(config.server.port, '0.0.0.0', () => {
+      console.log(`✅ Redis + Colyseus server running on http://0.0.0.0:${config.server.port}`);
+      console.log(`📊 Using Redis at ${config.redis.host}:${config.redis.port}`);
+      console.log(`🎮 Game rooms: redisLobby, redisGame, redisReplay`);
+      console.log(`🔧 Redis presence enabled`);
+      console.log('🚀 Server ready for connections');
+      
+      // Run additional cleanup after server is fully started
+      setTimeout(async () => {
+        console.log('🧹 Running post-startup cleanup...');
+        await cleanupStaleEntries();
+        console.log('✅ Post-startup cleanup completed');
+      }, 2000);
+    });
+  } catch (error) {
+    console.error('❌ Failed to initialize server:', error);
+    process.exit(1);
+  }
+}
+
+// Initialize the server
+initializeServer();
+
+// Add error handling for the game server
+gameServer.onShutdown(() => {
+  console.log('Game server shutting down...');
 });
 
 // Graceful shutdown
+let isShuttingDown = false;
+
 process.on('SIGTERM', async () => {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  
   console.log('SIGTERM received, shutting down gracefully...');
-  await gameServer.gracefullyShutdown();
+  try {
+    // Shutdown the game server first
+    await gameServer.gracefullyShutdown();
+    console.log('✅ Game server shutdown completed');
+    
+    // Clean up Redis presence and driver
+    if (presence && presence.shutdown) {
+      await presence.shutdown();
+      console.log('✅ Redis presence shutdown completed');
+    }
+    
+    if (redisDriver && redisDriver.shutdown) {
+      await redisDriver.shutdown();
+      console.log('✅ Redis driver shutdown completed');
+    }
+    
+    // Clean up Redis manager connections
+    await RedisManager.cleanup();
+    console.log('✅ Redis manager cleanup completed');
+    
+    console.log('✅ Server shutdown completed');
+  } catch (error) {
+    console.error('❌ Error during shutdown:', error);
+  }
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  
   console.log('SIGINT received, shutting down gracefully...');
-  await gameServer.gracefullyShutdown();
+  try {
+    // Shutdown the game server first
+    await gameServer.gracefullyShutdown();
+    console.log('✅ Game server shutdown completed');
+    
+    // Clean up Redis presence and driver
+    if (presence && presence.shutdown) {
+      await presence.shutdown();
+      console.log('✅ Redis presence shutdown completed');
+    }
+    
+    if (redisDriver && redisDriver.shutdown) {
+      await redisDriver.shutdown();
+      console.log('✅ Redis driver shutdown completed');
+    }
+    
+    // Clean up Redis manager connections
+    await RedisManager.cleanup();
+    console.log('✅ Redis manager cleanup completed');
+    
+    console.log('✅ Server shutdown completed');
+  } catch (error) {
+    console.error('❌ Error during shutdown:', error);
+  }
   process.exit(0);
-});
-
-server.listen(config.server.port, () => {
-  console.log(`✅ Redis + Colyseus server running on http://localhost:${config.server.port}`);
-  console.log(`📊 Using Redis at ${config.redis.host}:${config.redis.port}`);
-  console.log(`🎮 Game rooms: redisLobby, redisGame, redisReplay`);
 });

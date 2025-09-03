@@ -2,7 +2,7 @@
 module.exports = {
   // Redis Configuration
   redis: {
-    host: process.env.REDIS_HOST || '192.168.1.152',
+    host: process.env.REDIS_HOST || '192.168.150.51',
     port: process.env.REDIS_PORT || 6379,
     password: process.env.REDIS_PASSWORD || null,
     db: process.env.REDIS_DB || 0,
@@ -71,33 +71,14 @@ module.exports = {
   // Colyseus Configuration
   colyseus: {
     patchRate: 50, // ms - how often to send state updates
-    presence: {
-      // Redis presence configuration
-      redis: {
-        host: process.env.REDIS_HOST || '192.168.1.152',
-        port: process.env.REDIS_PORT || 6379,
-        password: process.env.REDIS_PASSWORD || null,
-        db: process.env.REDIS_PRESENCE_DB || 1,
-        // Add connection timeout and retry settings for presence
-        connectTimeout: 10000,
-        commandTimeout: 5000,
-        lazyConnect: true,
-        keepAlive: 30000,
-        family: 4, // Force IPv4
-        retryDelayOnClusterDown: 300,
-        maxRetriesPerRequest: 3,
-        enableReadyCheck: true,
-        maxLoadingTimeout: 10000
-      }
-    },
     // Cloudflare compatibility settings
     server: {
       // Increase timeouts for Cloudflare proxy and Docker environment
       pingInterval: 60000, // ms - ping interval (increased for Docker)
       pingMaxRetries: 5, // max ping retries (reduced to prevent spam)
       // Health check settings - more lenient for Docker
-      healthCheckInterval: 120000, // ms - health check interval (increased significantly)
-      healthCheckTimeout: 30000, // ms - health check timeout (increased)
+      healthCheckInterval: 300000, // ms - health check interval (increased to 5 minutes)
+      healthCheckTimeout: 60000, // ms - health check timeout (increased to 1 minute)
       // Room cleanup settings
       roomCleanupInterval: 300000, // ms - room cleanup interval (increased)
       // WebSocket settings
