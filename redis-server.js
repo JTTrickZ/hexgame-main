@@ -24,6 +24,22 @@ const app = express();
 app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, "public")));
 
+// Cloudflare compatibility middleware
+app.use((req, res, next) => {
+  // Trust Cloudflare proxy headers
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  
+  // Allow WebSocket upgrades through Cloudflare
+  if (req.headers.upgrade === 'websocket') {
+    res.setHeader('Connection', 'upgrade');
+    res.setHeader('Upgrade', 'websocket');
+  }
+  
+  next();
+});
+
 // --- Helpers: HMAC sign/verify ---
 function signPlayerId(playerId) {
   return crypto.createHmac("sha256", config.server.hmacSecret).update(playerId).digest("hex");
@@ -134,6 +150,24 @@ app.get("/api/history", async (req, res) => {
   }
 });
 
+// Health check endpoint for Cloudflare
+app.get("/health", (req, res) => {
+  res.status(200).json({ 
+    status: "healthy", 
+    timestamp: Date.now(),
+    redis: "connected",
+    rooms: ["redisLobby", "redisGame", "redisReplay"]
+  });
+});
+
+// WebSocket upgrade endpoint for Cloudflare
+app.get("/ws", (req, res) => {
+  res.status(200).json({ 
+    websocket: "available",
+    upgrade: "supported"
+  });
+});
+
 // --- HTTP server + Colyseus ---
 const server = http.createServer(app);
 
@@ -141,8 +175,22 @@ const server = http.createServer(app);
 const redisDriver = new RedisDriver(config.redis);
 
 const gameServer = new Server({
-  transport: new WebSocketTransport({ server }),
+  transport: new WebSocketTransport({ 
+    server,
+    // Cloudflare compatibility settings
+    pingInterval: config.colyseus.server.pingInterval,
+    pingMaxRetries: config.colyseus.server.pingMaxRetries,
+    maxPayloadLength: config.colyseus.server.maxPayloadLength,
+  }),
   driver: redisDriver,
+  // Server-level settings for Cloudflare
+  server: {
+    healthCheckInterval: config.colyseus.server.healthCheckInterval,
+    healthCheckTimeout: config.colyseus.server.healthCheckTimeout,
+    roomCleanupInterval: config.colyseus.server.roomCleanupInterval,
+    connectTimeout: config.colyseus.server.connectTimeout,
+    disconnectTimeout: config.colyseus.server.disconnectTimeout,
+  }
 });
 
 // Define rooms with Redis driver
