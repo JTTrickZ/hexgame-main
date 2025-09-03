@@ -3,7 +3,6 @@ module.exports = {
   // Redis Configuration
   redis: {
     host: process.env.REDIS_HOST || '192.168.1.152',
-    host: process.env.REDIS_HOST_Local || '192.168.150.51',
     port: process.env.REDIS_PORT || 6379,
     password: process.env.REDIS_PASSWORD || null,
     db: process.env.REDIS_DB || 0,
@@ -48,7 +47,7 @@ module.exports = {
     autoCaptureThreshold: 3, // need >= 4 same-owner neighbors to capture
     
     // Mountain generation params
-    mountainChains: 6, // number of mountain chains to generate
+    mountainChains: 10, // number of mountain chains to generate
     mountainChainLength: 10, // length of each mountain chain
     mountainDensity: 0.15, // density of mountain branching
     
@@ -70,6 +69,22 @@ module.exports = {
         password: process.env.REDIS_PASSWORD || null,
         db: process.env.REDIS_PRESENCE_DB || 1
       }
+    },
+    // Cloudflare compatibility settings
+    server: {
+      // Increase timeouts for Cloudflare proxy
+      pingInterval: 25000, // ms - ping interval (increased from default)
+      pingMaxRetries: 10, // max ping retries (increased from default)
+      // Health check settings
+      healthCheckInterval: 30000, // ms - health check interval (increased)
+      healthCheckTimeout: 10000, // ms - health check timeout (increased)
+      // Room cleanup settings
+      roomCleanupInterval: 60000, // ms - room cleanup interval (increased)
+      // WebSocket settings
+      maxPayloadLength: 1024 * 1024, // 1MB max payload
+      // Connection settings
+      connectTimeout: 30000, // ms - connection timeout (increased)
+      disconnectTimeout: 10000, // ms - disconnect timeout (increased)
     }
   }
 };
