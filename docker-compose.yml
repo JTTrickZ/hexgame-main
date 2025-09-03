@@ -14,4 +14,4 @@ services:
       - /mnt/user/hexgame:/app   # Mount NAS share into container
     ports:
       - "3000:3000"
-    command: sh -c "npm install && node server.js"
+    command: sh -c "npm install && node redis-server.js"
