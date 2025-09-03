@@ -3,6 +3,7 @@ module.exports = {
   // Redis Configuration
   redis: {
     host: process.env.REDIS_HOST || '192.168.1.152',
+    host: process.env.REDIS_HOST_Local || '192.168.150.51',
     port: process.env.REDIS_PORT || 6379,
     password: process.env.REDIS_PASSWORD || null,
     db: process.env.REDIS_DB || 0,
@@ -34,7 +35,7 @@ module.exports = {
     attackMult: 2.5, // scales based on defender strength
     
     // Economy
-    baseIncome: 2, // per turn or per tick income
+    baseIncome: 10, // per turn or per tick income
     startingPoints: 200, // starting points for new players
     startingMaxPoints: 200, // starting max points for new players
     
@@ -47,8 +48,8 @@ module.exports = {
     autoCaptureThreshold: 3, // need >= 4 same-owner neighbors to capture
     
     // Mountain generation params
-    mountainChains: 3, // number of mountain chains to generate
-    mountainChainLength: 8, // length of each mountain chain
+    mountainChains: 6, // number of mountain chains to generate
+    mountainChainLength: 10, // length of each mountain chain
     mountainDensity: 0.15, // density of mountain branching
     
     // Player colors
