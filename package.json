@@ -10,11 +10,14 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@colyseus/redis-driver": "^0.16.1",
     "@colyseus/schema": "^3.0.56",
+    "@colyseus/ws-transport": "^0.16.1",
     "better-sqlite3": "^12.2.0",
     "colyseus": "^0.16.4",
     "colyseus.js": "^0.16.19",
     "express": "^5.1.0",
+    "ioredis": "^5.7.0",
     "socket.io": "^4.8.1"
   }
 }

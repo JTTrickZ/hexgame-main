@@ -120,7 +120,7 @@ let lobbyRoom = null;
 
   // Try to join the lobby. If the join fails (server rejects), handle gracefully.
   try {
-    lobbyRoom = await client.joinOrCreate("lobby", { playerId, token });
+    lobbyRoom = await client.joinOrCreate("redisLobby", { playerId, token });
 
     // If we got here, join succeeded; attach handlers
 

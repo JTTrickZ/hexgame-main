@@ -713,18 +713,6 @@ class GameRoom extends colyseus.Room {
         continue;
       }
 
-      // Adjacency check: don't allow painting if not adjacent and they already have tiles
-      const ownedHexes = this.db.getAllHexes(this.gameId).filter(h => h.playerId === playerId);
-      const isAdjacent = ownedHexes.length === 0 || ownedHexes.some(h => {
-        const neighbors = this.getNeighborCoords(h.q, h.r);
-        return neighbors.some(n => n.q === q && n.r === r);
-      });
-
-      if (!isAdjacent && ownedHexes.length > 0) {
-        results.push({ q, r, ok: false, reason: "not_adjacent" });
-        continue;
-      }
-
       // Deduct points (this will clamp to current maxPoints)
       this.db.updatePlayerPoints(this.gameId, playerId, currentPoints - cost);
 

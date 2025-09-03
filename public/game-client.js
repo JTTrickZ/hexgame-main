@@ -44,7 +44,7 @@ const maxScale = 3;
 // --- Client-side action queue and sync system ---
 const ACTION_SYNC_INTERVAL = 100; // ms - how often to sync actions to server
 const HOVER_SYNC_INTERVAL = 200; // ms - how often to sync hover requests
-const POINTS_SYNC_INTERVAL = 1000; // ms - how often to request points updates
+const POINTS_SYNC_INTERVAL = 2000; // ms - how often to request points updates (increased from 1000)
 const OPTIMISTIC_TIMEOUT = 5000; // ms - how long to keep optimistic updates before clearing
 
 let actionQueue = []; // pending actions to send to server
@@ -70,10 +70,10 @@ function syncActionsToServer() {
   
   // Send grouped actions
   if (fillActions.length > 0) {
-    if (window.currentRoom) window.currentRoom.send("batchFillHex", { actions: fillActions.map(a => ({ q: a.q, r: a.r })) });
+    if (window.currentRoom) window.currentRoom.send("batchFillHex", { hexes: fillActions.map(a => ({ q: a.q, r: a.r })) });
   }
   if (upgradeActions.length > 0) {
-    if (window.currentRoom) window.currentRoom.send("batchUpgradeHex", { actions: upgradeActions.map(a => ({ q: a.q, r: a.r, type: a.upgradeType })) });
+    if (window.currentRoom) window.currentRoom.send("batchUpgradeHex", { hexes: upgradeActions.map(a => ({ q: a.q, r: a.r, type: a.upgradeType })) });
   }
   if (startActions.length > 0) {
     const startAction = startActions[0]; // Only one start action allowed
@@ -101,7 +101,7 @@ function requestPointsUpdate() {
   const now = Date.now();
   if (now - lastPointsSync < POINTS_SYNC_INTERVAL) return;
   
-  if (window.currentRoom) window.currentRoom.send("requestPointsUpdate", { playerId });
+  if (window.currentRoom) window.currentRoom.send("requestPointsUpdate", {});
   lastPointsSync = now;
 }
 
