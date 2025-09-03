@@ -174,6 +174,15 @@ const server = http.createServer(app);
 // Create Redis driver for Colyseus
 const redisDriver = new RedisDriver(config.redis);
 
+// Add error handling for Redis driver
+redisDriver.on('error', (error) => {
+  console.error('Redis driver error:', error);
+});
+
+redisDriver.on('connect', () => {
+  console.log('✅ Redis driver connected successfully');
+});
+
 const gameServer = new Server({
   transport: new WebSocketTransport({ 
     server,
@@ -183,7 +192,7 @@ const gameServer = new Server({
     maxPayloadLength: config.colyseus.server.maxPayloadLength,
   }),
   driver: redisDriver,
-  // Server-level settings for Cloudflare
+  // Server-level settings for Cloudflare and Docker
   server: {
     healthCheckInterval: config.colyseus.server.healthCheckInterval,
     healthCheckTimeout: config.colyseus.server.healthCheckTimeout,
@@ -197,6 +206,17 @@ const gameServer = new Server({
 gameServer.define("redisLobby", RedisLobbyRoom, { verifyPlayer: verifyPlayerId });
 gameServer.define("redisGame", RedisGameRoom, { verifyPlayer: verifyPlayerId });
 gameServer.define("redisReplay", RedisReplayRoom, { verifyPlayer: verifyPlayerId });
+
+// Test Redis connection on startup
+const gameData = new GameData();
+gameData.testConnection().then(success => {
+  if (success) {
+    console.log('✅ Redis connection verified on startup');
+  } else {
+    console.error('❌ Redis connection failed on startup - check network connectivity');
+  }
+  gameData.disconnect();
+});
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {

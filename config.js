@@ -7,7 +7,17 @@ module.exports = {
     password: process.env.REDIS_PASSWORD || null,
     db: process.env.REDIS_DB || 0,
     retryDelayOnFailover: 100,
-    maxRetriesPerRequest: 3
+    maxRetriesPerRequest: 3,
+    // Add connection timeout and retry settings
+    connectTimeout: 10000,
+    commandTimeout: 5000,
+    lazyConnect: true,
+    keepAlive: 30000,
+    family: 4, // Force IPv4
+    retryDelayOnClusterDown: 300,
+    maxRetriesPerRequest: 3,
+    enableReadyCheck: true,
+    maxLoadingTimeout: 10000
   },
 
   // Server Configuration
@@ -64,27 +74,37 @@ module.exports = {
     presence: {
       // Redis presence configuration
       redis: {
-        host: process.env.REDIS_HOST || 'localhost',
+        host: process.env.REDIS_HOST || '192.168.1.152',
         port: process.env.REDIS_PORT || 6379,
         password: process.env.REDIS_PASSWORD || null,
-        db: process.env.REDIS_PRESENCE_DB || 1
+        db: process.env.REDIS_PRESENCE_DB || 1,
+        // Add connection timeout and retry settings for presence
+        connectTimeout: 10000,
+        commandTimeout: 5000,
+        lazyConnect: true,
+        keepAlive: 30000,
+        family: 4, // Force IPv4
+        retryDelayOnClusterDown: 300,
+        maxRetriesPerRequest: 3,
+        enableReadyCheck: true,
+        maxLoadingTimeout: 10000
       }
     },
     // Cloudflare compatibility settings
     server: {
-      // Increase timeouts for Cloudflare proxy
-      pingInterval: 25000, // ms - ping interval (increased from default)
-      pingMaxRetries: 10, // max ping retries (increased from default)
-      // Health check settings
-      healthCheckInterval: 30000, // ms - health check interval (increased)
-      healthCheckTimeout: 10000, // ms - health check timeout (increased)
+      // Increase timeouts for Cloudflare proxy and Docker environment
+      pingInterval: 60000, // ms - ping interval (increased for Docker)
+      pingMaxRetries: 5, // max ping retries (reduced to prevent spam)
+      // Health check settings - more lenient for Docker
+      healthCheckInterval: 120000, // ms - health check interval (increased significantly)
+      healthCheckTimeout: 30000, // ms - health check timeout (increased)
       // Room cleanup settings
-      roomCleanupInterval: 60000, // ms - room cleanup interval (increased)
+      roomCleanupInterval: 300000, // ms - room cleanup interval (increased)
       // WebSocket settings
       maxPayloadLength: 1024 * 1024, // 1MB max payload
       // Connection settings
-      connectTimeout: 30000, // ms - connection timeout (increased)
-      disconnectTimeout: 10000, // ms - disconnect timeout (increased)
+      connectTimeout: 60000, // ms - connection timeout (increased)
+      disconnectTimeout: 30000, // ms - disconnect timeout (increased)
     }
   }
 };

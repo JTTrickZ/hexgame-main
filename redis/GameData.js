@@ -5,15 +5,39 @@ const config = require("../config");
 class GameData {
   constructor() {
     this.redis = new Redis(config.redis);
+    
+    // Enhanced error handling and logging
     this.redis.on('error', (error) => {
-      console.warn('Redis connection error:', error.message);
+      console.error('❌ Redis connection error:', error.message);
+      console.error('Redis error details:', {
+        code: error.code,
+        errno: error.errno,
+        syscall: error.syscall,
+        address: error.address,
+        port: error.port
+      });
     });
+    
     this.redis.on('close', () => {
-      console.log('Redis connection closed');
+      console.warn('⚠️ Redis connection closed');
     });
+    
     this.redis.on('end', () => {
-      console.log('Redis connection ended');
+      console.warn('⚠️ Redis connection ended');
     });
+    
+    this.redis.on('connect', () => {
+      console.log('✅ Redis connected successfully');
+    });
+    
+    this.redis.on('ready', () => {
+      console.log('✅ Redis ready for commands');
+    });
+    
+    this.redis.on('reconnecting', (delay) => {
+      console.log(`🔄 Redis reconnecting in ${delay}ms`);
+    });
+    
     this.HEX_DIRS = [
       {q: 1, r: 0}, {q: 1, r: -1}, {q: 0, r: -1},
       {q: -1, r: 0}, {q: -1, r: 1}, {q: 0, r: 1},
@@ -21,8 +45,28 @@ class GameData {
   }
 
   // Helper method to check if Redis is available
-  isRedisAvailable() {
-    return this.redis && this.redis.status === 'ready';
+  async isRedisAvailable() {
+    try {
+      await this.redis.ping();
+      return true;
+    } catch (error) {
+      console.error('Redis ping failed:', error.message);
+      return false;
+    }
+  }
+
+  // Test Redis connection and log status
+  async testConnection() {
+    try {
+      const start = Date.now();
+      await this.redis.ping();
+      const latency = Date.now() - start;
+      console.log(`✅ Redis connection test successful (${latency}ms latency)`);
+      return true;
+    } catch (error) {
+      console.error('❌ Redis connection test failed:', error.message);
+      return false;
+    }
   }
 
   // Player Management

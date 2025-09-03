@@ -120,7 +120,10 @@ let lobbyRoom = null;
 
   // Try to join the lobby. If the join fails (server rejects), handle gracefully.
   try {
+    console.log('🔄 Attempting to connect to redisLobby...');
     lobbyRoom = await client.joinOrCreate("redisLobby", { playerId, token });
+
+    // If we got here, join succeeded; attach handlers
 
     // If we got here, join succeeded; attach handlers
 
@@ -200,6 +203,10 @@ let lobbyRoom = null;
     if (msg.includes("invalid") || msg.includes("missing") || msg.includes("duplicate") || msg.includes("player")) {
       // Clear local identity and prompt registration
       await clearLocalIdentityAndShowModal("server rejected join: " + (e.message || "unknown reason"));
+    } else if (msg.includes("process") && msg.includes("not available")) {
+      // Process not available - likely Redis/health check issue
+      console.error("Server process health check failed - this may be a Redis connectivity issue");
+      alert("Server is experiencing connectivity issues. Please try again in a few moments. If the problem persists, contact the administrator.");
     } else {
       // Non-auth related failure: show an alert but do not clear identity automatically
       alert("Could not connect to lobby. Is the server running? (open console for details)");
