@@ -2,6 +2,10 @@
 const Redis = require("ioredis");
 const config = require("../config");
 
+// Parse -local flag
+const useLocalRedis = process.argv.includes('-local');
+const redisConfig = useLocalRedis ? config.redisLocal : config.redis;
+
 class RedisManager {
   constructor() {
     if (RedisManager.instance) {
@@ -12,6 +16,7 @@ class RedisManager {
     this.connectionPool = [];
     this.maxConnections = 10;
     this.currentConnections = 0;
+    this.redisConfig = redisConfig;
     
     RedisManager.instance = this;
   }
@@ -50,23 +55,7 @@ class RedisManager {
 
   // Create a new Redis connection
   createConnection() {
-    const redisConfig = {
-      host: config.redis.host,
-      port: config.redis.port,
-      password: config.redis.password,
-      db: config.redis.db,
-      connectTimeout: 10000,
-      commandTimeout: 5000,
-      lazyConnect: false,
-      keepAlive: 30000,
-      family: 4,
-      retryDelayOnFailover: 100,
-      maxRetriesPerRequest: 3,
-      enableReadyCheck: true,
-      maxLoadingTimeout: 10000
-    };
-    
-    const redis = new Redis(redisConfig);
+    const redis = new Redis(this.redisConfig);
     
     redis.on('error', (error) => {
       console.error('❌ Redis connection error:', error.message);

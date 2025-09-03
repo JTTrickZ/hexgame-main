@@ -175,12 +175,16 @@ app.get("/ws", (req, res) => {
 // --- HTTP server + Colyseus ---
 const server = http.createServer(app);
 
+// Parse -local flag
+const useLocalRedis = process.argv.includes('-local');
+const redisConfig = useLocalRedis ? config.redisLocal : config.redis;
+
 // Create Redis driver for Colyseus
-const redisDriver = new RedisDriver(config.redis);
+const redisDriver = new RedisDriver(redisConfig);
 
 // Create Redis presence adapter
 const RedisPresence = require('@colyseus/redis-presence').RedisPresence;
-const presence = new RedisPresence(config.redis);
+const presence = new RedisPresence(redisConfig);
 
 const gameServer = new Server({
   transport: new WebSocketTransport({ 
@@ -210,7 +214,7 @@ gameServer.define("redisReplay", RedisReplayRoom, { verifyPlayer: verifyPlayerId
 // Clean up stale Colyseus entries at startup
 async function cleanupStaleEntries() {
   try {
-    const redis = new (require('ioredis'))(config.redis);
+    const redis = new (require('ioredis'))(redisConfig);
     
     console.log('🧹 Starting cleanup of stale entries...');
     
@@ -286,7 +290,7 @@ async function initializeServer() {
     await cleanupStaleEntries();
     
     // Additional cleanup to prevent health check loops
-    const redis = new (require('ioredis'))(config.redis);
+    const redis = new (require('ioredis'))(redisConfig);
     try {
       // Force cleanup of any remaining process registrations
       await redis.del('colyseus:nodes');
@@ -303,7 +307,7 @@ async function initializeServer() {
     // Start the server after cleanup is complete
     server.listen(config.server.port, '0.0.0.0', () => {
       console.log(`✅ Redis + Colyseus server running on http://0.0.0.0:${config.server.port}`);
-      console.log(`📊 Using Redis at ${config.redis.host}:${config.redis.port}`);
+      console.log(`📊 Using Redis at ${redisConfig.host}:${redisConfig.port}`);
       console.log(`🎮 Game rooms: redisLobby, redisGame, redisReplay`);
       console.log(`🔧 Redis presence enabled`);
       console.log('🚀 Server ready for connections');

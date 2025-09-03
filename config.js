@@ -2,7 +2,7 @@
 module.exports = {
   // Redis Configuration
   redis: {
-    host: process.env.REDIS_HOST || '192.168.150.51',
+    host: process.env.REDIS_HOST || '192.168.1.152',
     port: process.env.REDIS_PORT || 6379,
     password: process.env.REDIS_PASSWORD || null,
     db: process.env.REDIS_DB || 0,
@@ -14,6 +14,24 @@ module.exports = {
     lazyConnect: true,
     keepAlive: 30000,
     family: 4, // Force IPv4
+    retryDelayOnClusterDown: 300,
+    maxRetriesPerRequest: 3,
+    enableReadyCheck: true,
+    maxLoadingTimeout: 10000
+  },
+  // Add a local Redis config for -local flag
+  redisLocal: {
+    host: process.env.REDIS_LOCAL_HOST || '192.168.150.51',
+    port: process.env.REDIS_LOCAL_PORT || 6379,
+    password: process.env.REDIS_LOCAL_PASSWORD || null,
+    db: process.env.REDIS_LOCAL_DB || 0,
+    retryDelayOnFailover: 100,
+    maxRetriesPerRequest: 3,
+    connectTimeout: 10000,
+    commandTimeout: 5000,
+    lazyConnect: true,
+    keepAlive: 30000,
+    family: 4,
     retryDelayOnClusterDown: 300,
     maxRetriesPerRequest: 3,
     enableReadyCheck: true,
