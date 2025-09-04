@@ -10,6 +10,7 @@ class RedisGameRoom extends Room {
     this.verifyPlayer = options.verifyPlayer;
     this.allowedPlayerIds = new Set(options.allowedPlayerIds || []);
     this.gameId = this.roomId;
+    this.autoDispose = false;
 
     // Initialize state
     this.setState(new GameState());
@@ -20,6 +21,9 @@ class RedisGameRoom extends Room {
 
     // Generate mountains for this game
     this.gameData.generateMountains(this.gameId);
+
+    // Generate rivers for this game
+    this.gameData.generateRivers(this.gameId);
 
     // Auto-expansion interval
     this.autoExpandInterval = null;
@@ -104,7 +108,13 @@ class RedisGameRoom extends Room {
                 this.getNeighborCoords(q, r).map(n => this.gameData.getHexOwner(this.gameId, n.q, n.r))
               );
               const fullyEnclosed = neighborsHexes.every(n => n && n.playerId === maxPlayer);
-              allowCapture = fullyEnclosed;
+              
+              // Check for river exception: if hex is adjacent to river and player has river access
+              const isAdjacentToRiver = await this.gameData.isAdjacentToRiver(this.gameId, q, r);
+              const playerHasRiverAccess = await this.gameData.playerHasRiverAccess(this.gameId, maxPlayer);
+              const riverException = isAdjacentToRiver && playerHasRiverAccess;
+              
+              allowCapture = fullyEnclosed || riverException;
             }
 
             if (!allowCapture) continue;
@@ -187,6 +197,16 @@ class RedisGameRoom extends Room {
     const expansionCost = config.game.hexValue + Math.floor(config.game.expGrowth * Math.log2(attackerHexCount + 2));
     let cost = expansionCost;
 
+    // Check if this hex is adjacent to a river
+    const isAdjacentToRiver = await this.gameData.isAdjacentToRiver(this.gameId, q, r);
+    const playerHasRiverAccess = await this.gameData.playerHasRiverAccess(this.gameId, attackerPlayerId);
+
+    // River claiming rule: if hex is adjacent to river and player has river access, allow claiming
+    if (isAdjacentToRiver && playerHasRiverAccess) {
+      // Reduce cost for river-adjacent hexes
+      cost = Math.max(1, Math.floor(cost * 0.7)); // 30% discount for river access
+    }
+
     if (occupied && occupied.playerId && occupied.playerId !== attackerPlayerId) {
       const defPlayerId = occupied.playerId;
       const defenderHexCount = Math.max(1, await this.gameData.getHexCountForPlayer(this.gameId, defPlayerId));
@@ -235,11 +255,29 @@ class RedisGameRoom extends Room {
       return;
     }
 
+    // Cancel cleanup timeout if someone is rejoining
+    if (this.cleanupTimeout) {
+      console.log(`⏸ RedisGameRoom ${this.gameId} cleanup cancelled - player ${playerId} rejoined`);
+      clearTimeout(this.cleanupTimeout);
+      this.cleanupTimeout = null;
+    }
+
+    // Check if player is already in state (reconnection)
+    let existingPlayer = null;
+    for (const [sessionId, p] of this.state.players.entries()) {
+      if (p.id === playerId) {
+        existingPlayer = p;
+        // Remove the old session entry
+        this.state.players.delete(sessionId);
+        break;
+      }
+    }
+
     const playerData = await this.gameData.getPlayer(playerId);
     const playerPoints = await this.gameData.getPlayerPoints(this.gameId, playerId);
 
-    // Create player in state
-    const player = new Player();
+    // Create or update player in state
+    const player = existingPlayer || new Player();
     player.id = playerId;
     player.username = playerData.username;
     player.color = playerData.color;
@@ -248,16 +286,21 @@ class RedisGameRoom extends Room {
     player.tiles = parseInt(playerPoints.tiles);
     player.started = !!(playerPoints.startQ && playerPoints.startR);
     player.lastSeen = Date.now();
+    player.disconnected = false; // Mark as connected
 
     this.state.players.set(client.sessionId, player);
     this.state.lastUpdateTime = Date.now();
 
     await this.gameData.updatePlayerSession(playerId, client.sessionId);
-    await this.gameData.addPlayerToGame(this.gameId, playerId);
+    
+    // Only add player to game if they're not already in it (for reconnections)
+    if (!existingPlayer) {
+      await this.gameData.addPlayerToGame(this.gameId, playerId);
+    }
 
     // Send initial data
     client.send("assignedColor", { color: player.color });
-    client.send("lobbyStartTime", { ts: this.state.lobbyStartTime });
+    client.send("lobbyStartTime", { ts: this.state.lobbyStartTime, startDelay: config.game.startDelay });
 
     // Send hex history - this is critical for syncing
     const hexes = await this.gameData.getAllHexes(this.gameId);
@@ -291,18 +334,66 @@ class RedisGameRoom extends Room {
   async onLeave(client) {
     const playerId = this.getPlayerIdBySession(client.sessionId);
     if (playerId) {
-      console.log(`⏸ Player ${playerId} left (session ${client.sessionId}) but kept in lobby for reconnect`);
-      await this.gameData.removePlayerFromGame(this.gameId, playerId);
+      console.log(`⏸ Player ${playerId} left (session ${client.sessionId}) but kept in game for reconnect`);
+      // Don't remove player from game - keep them for reconnection
     }
 
-    if (this.state.players.size === 0) {
-      clearInterval(this.playerTickInterval);
-      if (this.autoExpandInterval) {
-        clearInterval(this.autoExpandInterval);
-        this.autoExpandInterval = null;
+    // Mark player as disconnected but keep them in state for reconnection
+    const player = this.state.players.get(client.sessionId);
+    if (player) {
+      player.disconnected = true;
+      player.lastSeen = Date.now();
+    }
+
+    // Count only connected players
+    const connectedPlayers = Array.from(this.state.players.values()).filter(p => !p.disconnected);
+
+    if (connectedPlayers.length === 0) {
+      console.log(`⏳ RedisGameRoom ${this.gameId} is empty, starting 60-second cleanup buffer...`);
+
+      // Clear existing cleanup timeout if it exists
+      if (this.cleanupTimeout) {
+        clearTimeout(this.cleanupTimeout);
       }
-      this.gameData.closeGame(this.gameId);
-      console.log(`🏁 RedisGameRoom ${this.gameId} closed`);
+
+      // Set 60-second timeout before cleanup
+      this.cleanupTimeout = setTimeout(async () => {
+        // Count connected players again after timeout
+        const stillConnectedPlayers = Array.from(this.state.players.values()).filter(p => !p.disconnected);
+        
+        if (stillConnectedPlayers.length === 0) { // Double-check room is still empty
+          console.log(`🏁 RedisGameRoom ${this.gameId} cleanup timeout reached - room will be disposed naturally`);
+          
+          // Clean up intervals
+          if (this.playerTickInterval) {
+            clearInterval(this.playerTickInterval);
+            this.playerTickInterval = null;
+          }
+          if (this.autoExpandInterval) {
+            clearInterval(this.autoExpandInterval);
+            this.autoExpandInterval = null;
+          }
+          
+          // Remove all players from game before closing
+          for (const [sessionId, player] of this.state.players.entries()) {
+            await this.gameData.removePlayerFromGame(this.gameId, player.id);
+          }
+          
+          await this.gameData.closeGame(this.gameId);
+          
+          // Mark room as ready for disposal but don't force it
+          // Colyseus will dispose the room naturally since no players are connected
+          this.state.readyForDisposal = true;
+          this.state.lastUpdateTime = Date.now();
+          
+          
+          // Manually dispose the room after cleanup
+          this.disconnect();
+        } else {
+          console.log(`⏸ RedisGameRoom ${this.gameId} cleanup cancelled - player(s) rejoined`);
+        }
+        this.cleanupTimeout = null;
+      }, 60000); // 60 seconds
     }
   }
 
@@ -668,14 +759,19 @@ class RedisGameRoom extends Room {
       return;
     }
 
-    // Adjacency check
+    // Adjacency check with river exception
     const ownedHexes = (await this.gameData.getAllHexes(this.gameId)).filter(h => h.playerId === playerId);
     const isAdjacent = ownedHexes.length === 0 || ownedHexes.some(h => {
       const neighbors = this.getNeighborCoords(parseInt(h.q), parseInt(h.r));
       return neighbors.some(n => n.q === q && n.r === r);
     });
 
-    if (!isAdjacent && ownedHexes.length > 0) {
+    // Check if hex is adjacent to river and player has river access
+    const isAdjacentToRiver = await this.gameData.isAdjacentToRiver(this.gameId, q, r);
+    const playerHasRiverAccess = await this.gameData.playerHasRiverAccess(this.gameId, playerId);
+    const riverException = isAdjacentToRiver && playerHasRiverAccess;
+
+    if (!isAdjacent && !riverException && ownedHexes.length > 0) {
       client.send("fillResult", { q, r, ok: false, reason: "not_adjacent" });
       return;
     }
@@ -720,7 +816,7 @@ class RedisGameRoom extends Room {
 
   async recalculatePlayerPoints(playerId, shouldBroadcast = false) {
     try {
-      const player = Array.from(this.state.players.values()).find(p => p.id === playerId);
+      const player = Array.from(this.state.players.values()).find(p => p.id === playerId && !p.disconnected);
       if (!player) return;
 
       const points = await this.gameData.getPlayerPoints(this.gameId, playerId);
@@ -763,6 +859,9 @@ class RedisGameRoom extends Room {
         }
 
         for (const [sessionId, player] of this.state.players.entries()) {
+          // Only process connected players
+          if (player.disconnected) continue;
+          
           const currentPoints = parseInt((await this.gameData.getPlayerPoints(this.gameId, player.id)).points);
           const newPoints = currentPoints + config.game.baseIncome;
           await this.gameData.updatePlayerPoints(this.gameId, player.id, newPoints);
@@ -785,6 +884,12 @@ class RedisGameRoom extends Room {
   }
 
   onDispose() {
+    // Clear cleanup timeout if it exists
+    if (this.cleanupTimeout) {
+      clearTimeout(this.cleanupTimeout);
+      this.cleanupTimeout = null;
+    }
+
     if (this.autoExpandInterval) {
       clearInterval(this.autoExpandInterval);
     }

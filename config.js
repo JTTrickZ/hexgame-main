@@ -47,7 +47,7 @@ module.exports = {
   // Game Constants
   game: {
     // Timing
-    startDelay: 5000, // ms
+    startDelay: 15000, // ms
     autoExpandInterval: 10000, // ms
     
     // Hex Values
@@ -75,9 +75,22 @@ module.exports = {
     autoCaptureThreshold: 3, // need >= 4 same-owner neighbors to capture
     
     // Mountain generation params
-    mountainChains: 10, // number of mountain chains to generate
-    mountainChainLength: 10, // length of each mountain chain
-    mountainDensity: 0.15, // density of mountain branching
+    // Mountain generation params
+    mountainChains: 6, // fewer chains but make them more solid
+    mountainChainLength: 35, // longer solid lines
+    mountainDensity: 0.1, // much less branching for solid lines
+    mountainAreaSize: 50, // size of area for mountain generation (increased for better spread)
+    mountainChainSpacing: 15, // more spacing between chains
+    mountainZigzagChance: 0.25, // light zigzag for natural curves
+    
+    // River generation params
+    // River generation params
+    riverCount: 3, // fewer rivers but make them more defined
+    riverLength: 15, // longer straight lines
+    riverForkChance: 0.6, // moderate chance of branching
+    riverForkLength: 5, // longer fork branches
+    riverAreaSize: 50, // size of area for river generation (increased for better spread)
+    riverZigzagChance: 0.2, // light zigzag for natural curves
     
     // Player colors
     playerColors: [

@@ -567,31 +567,168 @@ class GameData {
 
   // Mountain Generation
   async generateMountains(gameId) {
-    const { mountainChains, mountainChainLength, mountainDensity } = config.game;
+    const { mountainChains, mountainChainLength, mountainDensity, mountainAreaSize, mountainChainSpacing, mountainZigzagChance } = config.game;
     
+    // Track used areas to avoid overlapping chains
+    const usedAreas = new Set();
+    const chainStartPoints = [];
+    
+    // Generate well-spaced starting points for chains
     for (let chain = 0; chain < mountainChains; chain++) {
-      // Generate a random starting point
-      const startQ = Math.floor(Math.random() * 20) - 10;
-      const startR = Math.floor(Math.random() * 20) - 10;
+      let startQ, startR;
+      let attempts = 0;
+      
+      do {
+        startQ = Math.floor(Math.random() * mountainAreaSize) - Math.floor(mountainAreaSize / 2);
+        startR = Math.floor(Math.random() * mountainAreaSize) - Math.floor(mountainAreaSize / 2);
+        attempts++;
+        
+        // Check if this point is far enough from existing chain starts
+        let tooClose = false;
+        for (const existing of chainStartPoints) {
+          const distance = Math.sqrt((startQ - existing.q) ** 2 + (startR - existing.r) ** 2);
+          if (distance < mountainChainSpacing) {
+            tooClose = true;
+            break;
+          }
+        }
+        
+        if (tooClose) continue;
+      } while (attempts < 200);
+      
+      chainStartPoints.push({ q: startQ, r: startR });
+    }
+    
+    // Generate each mountain chain as a solid line
+    for (let chain = 0; chain < chainStartPoints.length; chain++) {
+      const { q: startQ, r: startR } = chainStartPoints[chain];
+      
+      // Choose a primary direction for this chain
+      const primaryDirection = this.HEX_DIRS[Math.floor(Math.random() * this.HEX_DIRS.length)];
       
       let currentQ = startQ;
       let currentR = startR;
       
+      // Generate solid line with light zigzags
       for (let i = 0; i < mountainChainLength; i++) {
         // Set mountain hex
         await this.setHex(gameId, currentQ, currentR, null, '#8B4513', null, 'mountain');
         
-        // Randomly branch
+        // Very occasional small branching (for natural variation)
         if (Math.random() < mountainDensity) {
           const branchQ = currentQ + (Math.random() > 0.5 ? 1 : -1);
           const branchR = currentR + (Math.random() > 0.5 ? 1 : -1);
           await this.setHex(gameId, branchQ, branchR, null, '#8B4513', null, 'mountain');
         }
         
-        // Move along chain
-        const dir = this.HEX_DIRS[Math.floor(Math.random() * this.HEX_DIRS.length)];
-        currentQ += dir.q;
-        currentR += dir.r;
+        // Move primarily in the chosen direction with light zigzags
+        if (Math.random() < mountainZigzagChance) {
+          // Light zigzag - choose a slightly different direction
+          const zigzagDirections = this.HEX_DIRS.filter(dir => 
+            dir.q !== -primaryDirection.q || dir.r !== -primaryDirection.r
+          );
+          const zigzagDir = zigzagDirections[Math.floor(Math.random() * zigzagDirections.length)];
+          currentQ += zigzagDir.q;
+          currentR += zigzagDir.r;
+        } else {
+          // Continue in primary direction
+          currentQ += primaryDirection.q;
+          currentR += primaryDirection.r;
+        }
+      }
+    }
+  }
+
+  // River Generation
+  async generateRivers(gameId) {
+    const { riverCount, riverLength, riverForkChance, riverForkLength, riverAreaSize, riverZigzagChance } = config.game;
+    
+    // Track used areas to avoid overlapping rivers
+    const usedAreas = new Set();
+    const riverStartPoints = [];
+    
+    // Generate well-spaced starting points for rivers
+    for (let river = 0; river < riverCount; river++) {
+      let startQ, startR;
+      let attempts = 0;
+      
+      do {
+        startQ = Math.floor(Math.random() * riverAreaSize) - Math.floor(riverAreaSize / 2);
+        startR = Math.floor(Math.random() * riverAreaSize) - Math.floor(riverAreaSize / 2);
+        attempts++;
+        
+        // Check if this point is far enough from existing river starts
+        let tooClose = false;
+        for (const existing of riverStartPoints) {
+          const distance = Math.sqrt((startQ - existing.q) ** 2 + (startR - existing.r) ** 2);
+          if (distance < 15) { // Minimum spacing between rivers
+            tooClose = true;
+            break;
+          }
+        }
+        
+        if (tooClose) continue;
+      } while (attempts < 200);
+      
+      riverStartPoints.push({ q: startQ, r: startR });
+    }
+    
+    // Generate each river as a straight line with branches
+    for (let river = 0; river < riverStartPoints.length; river++) {
+      const { q: startQ, r: startR } = riverStartPoints[river];
+      
+      // Choose a primary direction for this river
+      const primaryDirection = this.HEX_DIRS[Math.floor(Math.random() * this.HEX_DIRS.length)];
+      
+      let currentQ = startQ;
+      let currentR = startR;
+      
+      // Generate main river as a straight line with light zigzags
+      for (let i = 0; i < riverLength; i++) {
+        // Set river hex
+        await this.setHex(gameId, currentQ, currentR, null, '#87CEEB', null, 'river');
+        
+        // Check if we should create a fork (branch)
+        if (Math.random() < riverForkChance && i > riverLength / 3) {
+          // Create a fork that goes in a different direction
+          const forkDirections = this.HEX_DIRS.filter(dir => 
+            dir.q !== -primaryDirection.q || dir.r !== -primaryDirection.r
+          );
+          const forkDir = forkDirections[Math.floor(Math.random() * forkDirections.length)];
+          
+          let forkQ = currentQ;
+          let forkR = currentR;
+          
+          // Generate fork branch as a straight line
+          for (let j = 0; j < riverForkLength; j++) {
+            forkQ += forkDir.q;
+            forkR += forkDir.r;
+            
+            // Light zigzag for the fork
+            if (Math.random() < riverZigzagChance) {
+              const zigzagDir = this.HEX_DIRS[Math.floor(Math.random() * this.HEX_DIRS.length)];
+              forkQ += zigzagDir.q;
+              forkR += zigzagDir.r;
+            }
+            
+            await this.setHex(gameId, forkQ, forkR, null, '#87CEEB', null, 'river');
+          }
+        }
+        
+        // Move primarily in the chosen direction with light zigzags
+        if (Math.random() < riverZigzagChance) {
+          // Light zigzag - choose a slightly different direction
+          const zigzagDirections = this.HEX_DIRS.filter(dir => 
+            dir.q !== -primaryDirection.q || dir.r !== -primaryDirection.r
+          );
+          const zigzagDir = zigzagDirections[Math.floor(Math.random() * zigzagDirections.length)];
+          currentQ += zigzagDir.q;
+          currentR += zigzagDir.r;
+        } else {
+          // Continue in primary direction
+          currentQ += primaryDirection.q;
+          currentR += primaryDirection.r;
+        }
       }
     }
   }
@@ -603,7 +740,7 @@ class GameData {
 
   async isHexPassable(gameId, q, r) {
     const hex = await this.getHex(gameId, q, r);
-    return !hex || hex.terrain !== 'mountain';
+    return !hex || hex.terrain !== 'mountain'; // Rivers are passable
   }
 
   // Auto-expansion helpers
@@ -620,6 +757,32 @@ class GameData {
     }
     
     return neighbors;
+  }
+
+  // Check if a hex is adjacent to a river
+  async isAdjacentToRiver(gameId, q, r) {
+    for (const dir of this.HEX_DIRS) {
+      const nq = q + dir.q;
+      const nr = r + dir.r;
+      const hex = await this.getHex(gameId, nq, nr);
+      if (hex && hex.terrain === 'river') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Check if a player owns any hex adjacent to a river
+  async playerHasRiverAccess(gameId, playerId) {
+    const hexes = await this.getAllHexes(gameId);
+    const playerHexes = hexes.filter(h => h.playerId === playerId);
+    
+    for (const hex of playerHexes) {
+      if (await this.isAdjacentToRiver(gameId, parseInt(hex.q), parseInt(hex.r))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   async getLastGames(playerId, limit = 10) {

@@ -80,10 +80,17 @@ class RedisLobbyRoom extends Room {
 
     // prevent duplicate presence
     for (const [sessionId, player] of this.state.players.entries()) {
-      if (player.id === playerId) {
+      if (player.id === playerId && !player.disconnected) {
         client.leave(1000, "duplicate session");
         return;
       }
+    }
+
+    // Cancel cleanup timeout if someone is rejoining
+    if (this.cleanupTimeout) {
+      console.log(`⏸ RedisLobbyRoom ${this.roomId} cleanup cancelled - player ${playerId} rejoined`);
+      clearTimeout(this.cleanupTimeout);
+      this.cleanupTimeout = null;
     }
 
     const playerData = await this.gameData.getPlayer(playerId);
@@ -92,8 +99,19 @@ class RedisLobbyRoom extends Room {
       return;
     }
 
-    // Create player in state
-    const player = new Player();
+    // Check if player is already in state (reconnection)
+    let existingPlayer = null;
+    for (const [sessionId, p] of this.state.players.entries()) {
+      if (p.id === playerId) {
+        existingPlayer = p;
+        // Remove the old session entry
+        this.state.players.delete(sessionId);
+        break;
+      }
+    }
+
+    // Create or update player in state
+    const player = existingPlayer || new Player();
     player.id = playerId;
     player.username = playerData.username;
     player.color = playerData.color;
@@ -102,6 +120,7 @@ class RedisLobbyRoom extends Room {
     player.tiles = 0;
     player.started = false;
     player.lastSeen = Date.now();
+    player.disconnected = false; // Mark as connected
 
     this.state.players.set(client.sessionId, player);
     this.state.lastUpdateTime = Date.now();
@@ -109,8 +128,10 @@ class RedisLobbyRoom extends Room {
     // Update session
     await this.gameData.updatePlayerSession(playerId, client.sessionId);
     
-    // Add player to lobby
-    await this.gameData.addPlayerToLobby(this.roomId, playerId);
+    // Add player to lobby only if they're not already in it (for reconnections)
+    if (!existingPlayer) {
+      await this.gameData.addPlayerToLobby(this.roomId, playerId);
+    }
 
     // Send initial data
     client.send("assignedColor", { color: player.color });
@@ -129,18 +150,48 @@ class RedisLobbyRoom extends Room {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
 
-    this.state.players.delete(client.sessionId);
-    this.state.lastUpdateTime = Date.now();
+    // Mark player as disconnected but keep them in state for reconnection
+    player.disconnected = true;
+    player.lastSeen = Date.now();
 
     console.log(`❌ Player ${player.id} disconnected (session ${client.sessionId})`);
+
+    // Count only connected players
+    const connectedPlayers = Array.from(this.state.players.values()).filter(p => !p.disconnected);
 
     // Broadcast lobby update to remaining clients
     this.broadcastLobbyUpdate();
 
-    if (this.state.players.size === 0) {
-      // Don't call Redis operations during shutdown
-      console.log("📦 Lobby empty, marking for disposal");
-      await this.gameData.closeLobby(this.roomId);
+    if (connectedPlayers.length === 0) {
+      console.log(`⏳ RedisLobbyRoom ${this.roomId} is empty, starting 60-second cleanup buffer...`);
+
+      // Clear existing cleanup timeout if it exists
+      if (this.cleanupTimeout) {
+        clearTimeout(this.cleanupTimeout);
+      }
+
+      // Set 60-second timeout before cleanup
+      this.cleanupTimeout = setTimeout(async () => {
+        // Count connected players again after timeout
+        const stillConnectedPlayers = Array.from(this.state.players.values()).filter(p => !p.disconnected);
+        
+        if (stillConnectedPlayers.length === 0) { // Double-check room is still empty
+          console.log(`📦 RedisLobbyRoom ${this.roomId} closed after 60s buffer - manually disposing room`);
+          
+          // Remove all players from lobby before closing
+          for (const [sessionId, player] of this.state.players.entries()) {
+            await this.gameData.removePlayerFromLobby(this.roomId, player.id);
+          }
+          
+          await this.gameData.closeLobby(this.roomId);
+          
+          // Manually dispose the room after cleanup
+          this.disconnect();
+        } else {
+          console.log(`⏸ RedisLobbyRoom ${this.roomId} cleanup cancelled - player(s) rejoined`);
+        }
+        this.cleanupTimeout = null;
+      }, 60000); // 60 seconds
     }
   }
 
@@ -149,6 +200,7 @@ class RedisLobbyRoom extends Room {
     let ready = 0;
     
     for (const [sessionId, player] of this.state.players.entries()) {
+      if (player.disconnected) continue; // Skip disconnected players
       if (player.started) ready++;
     }
     
@@ -165,6 +217,8 @@ class RedisLobbyRoom extends Room {
     let ready = 0;
     
     for (const [sessionId, player] of this.state.players.entries()) {
+      if (player.disconnected) continue; // Skip disconnected players
+      
       if (player.started) {
         ready++;
       } else {
@@ -172,12 +226,14 @@ class RedisLobbyRoom extends Room {
       }
     }
     
-    const players = Array.from(this.state.players.values()).map(p => ({
-      id: p.id,
-      username: p.username,
-      color: p.color,
-      started: p.started
-    }));
+    const players = Array.from(this.state.players.values())
+      .filter(p => !p.disconnected) // Only include connected players
+      .map(p => ({
+        id: p.id,
+        username: p.username,
+        color: p.color,
+        started: p.started
+      }));
     
     this.broadcast("lobbyUpdate", { total, waiting, ready, players });
   }
@@ -185,6 +241,7 @@ class RedisLobbyRoom extends Room {
   async startGame() {
     const readyPlayers = [];
     for (const [sessionId, player] of this.state.players.entries()) {
+      if (player.disconnected) continue; // Skip disconnected players
       if (player.started) {
         readyPlayers.push({
           sessionId,
@@ -225,6 +282,12 @@ class RedisLobbyRoom extends Room {
   }
 
   onDispose() {
+    // Clear cleanup timeout if it exists
+    if (this.cleanupTimeout) {
+      clearTimeout(this.cleanupTimeout);
+      this.cleanupTimeout = null;
+    }
+
     try {
       if (this.gameData) {
         // Use setTimeout to defer the disconnect and avoid blocking

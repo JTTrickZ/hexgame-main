@@ -32,13 +32,13 @@ if (el("roomIdLabel")) el("roomIdLabel").textContent = roomId || "—";
 // --- Hex math ---
 let HEX_SIZE = 15;
 const SQRT3 = Math.sqrt(3);
-const GRID_RADIUS = 40;
+const GRID_RADIUS = 60; // Increased to show more of the map
 
 // Camera / zoom
 let offsetX = 0;
 let offsetY = 0;
-let scale = 1;
-let minScale = 1;
+let scale = 0.6; // Start more zoomed out
+let minScale = 0.6; // Allow more zoom out
 const maxScale = 3;
 
 // --- Client-side action queue and sync system ---
@@ -257,6 +257,7 @@ function drawHex(q, r, colorArg = "#0c0f1e", hover = false, cost = null) {
     ctx.textBaseline = "middle";
     let emoji = "❓";
     if (terrain === "mountain") emoji = "⛰️";
+    if (terrain === "river") emoji = "🌊";
     ctx.strokeStyle = "rgba(0,0,0,0.8)";
     ctx.lineWidth = Math.max(2, Math.round(fontSize / 6));
     ctx.strokeText(emoji, cx, cy);
@@ -586,8 +587,9 @@ const HOVER_THROTTLE_MS = 150;
 
     room.onMessage("lobbyRoster", (list) => { renderRoster(list); scheduleDraw(); });
 
-    room.onMessage("lobbyStartTime", ({ ts }) => {
+    room.onMessage("lobbyStartTime", ({ ts, startDelay }) => {
       lobbyStartTime = ts;
+      window.gameStartDelay = startDelay || 15000; // Default to 15 seconds if not provided
       updateCountdown();
       if (countdownInterval) clearInterval(countdownInterval);
       countdownInterval = setInterval(updateCountdown, 500);
@@ -716,12 +718,13 @@ const HOVER_THROTTLE_MS = 150;
     function updateCountdown() {
       if (!lobbyStartTime) return;
       const nowTs = Date.now();
-      const remaining = Math.max(0, Math.ceil((lobbyStartTime + 5000 - nowTs) / 1000));
+      const startDelay = window.gameStartDelay || 15000; // Use server-provided delay or default
+      const remaining = Math.max(0, Math.ceil((lobbyStartTime + startDelay - nowTs) / 1000));
       if (remaining > 0 && !startChosen) {
         hudTime.textContent = `Choose start: ${remaining}`;
       } else {
         if (countdownInterval) clearInterval(countdownInterval);
-        gameStartTime = lobbyStartTime + 5000;
+        gameStartTime = lobbyStartTime + startDelay;
       }
     }
 
@@ -778,7 +781,8 @@ const HOVER_THROTTLE_MS = 150;
       if (!lastSentHex || lastSentHex.q !== q || lastSentHex.r !== r) {
         // check start stage: if still in choose-start window and not chosen, behave as single pick (no drag painting)
         const nowTs = Date.now();
-        if (lobbyStartTime && nowTs <= lobbyStartTime + 5000 && !startChosen) {
+        const startDelay = window.gameStartDelay || 15000;
+        if (lobbyStartTime && nowTs <= lobbyStartTime + startDelay && !startChosen) {
           // ignore drag during start phase
           return;
         }
@@ -829,7 +833,8 @@ const HOVER_THROTTLE_MS = 150;
       if (!hadMoveDuringPointer) {
         // ✅ deliberate click (no drag)
         const nowTs = Date.now();
-        if (lobbyStartTime && nowTs <= lobbyStartTime + 5000 && !startChosen) {
+        const startDelay = window.gameStartDelay || 15000;
+        if (lobbyStartTime && nowTs <= lobbyStartTime + startDelay && !startChosen) {
           // choose starting tile (optimistic for start)
           applyOptimisticUpdate(q, r, myColor, true);
           scheduleDraw();

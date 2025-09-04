@@ -40,6 +40,7 @@ class Player extends Schema {
     this.startR = "";
     this.started = false;
     this.lastSeen = 0;
+    this.disconnected = false;
   }
 }
 
@@ -54,7 +55,8 @@ type(Player, {
   startQ: "string",
   startR: "string",
   started: "boolean",
-  lastSeen: "number"
+  lastSeen: "number",
+  disconnected: "boolean"
 });
 
 class GameState extends Schema {
@@ -67,6 +69,7 @@ class GameState extends Schema {
     this.gameId = "";
     this.gameStarted = false;
     this.lastUpdateTime = 0;
+    this.readyForDisposal = false;
   }
 }
 
@@ -78,7 +81,8 @@ type(GameState, {
   countdown: "number",
   gameId: "string",
   gameStarted: "boolean",
-  lastUpdateTime: "number"
+  lastUpdateTime: "number",
+  readyForDisposal: "boolean"
 });
 
 module.exports = { GameState, Player, Hex };

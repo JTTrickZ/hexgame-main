@@ -71,7 +71,8 @@ class RedisReplayRoom extends Room {
       this.playbackTimers.forEach(t => t.clear && t.clear());
       this.playbackTimers = [];
       this.playing = false;
-      this.disconnect();
+      // Let the room dispose naturally instead of calling disconnect immediately
+      console.log(`📼 RedisReplayRoom ${this.gameId} empty - will be disposed naturally`);
     }
   }
 

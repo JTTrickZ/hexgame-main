@@ -207,9 +207,21 @@ const gameServer = new Server({
 });
 
 // Define rooms with Redis driver
-gameServer.define("redisLobby", RedisLobbyRoom, { verifyPlayer: verifyPlayerId });
-gameServer.define("redisGame", RedisGameRoom, { verifyPlayer: verifyPlayerId });
-gameServer.define("redisReplay", RedisReplayRoom, { verifyPlayer: verifyPlayerId });
+gameServer.define("redisLobby", RedisLobbyRoom, { 
+  verifyPlayer: verifyPlayerId,
+  allowReconnection: true,
+  maxClients: 200 // Allow unlimited clients to prevent auto-disposal
+});
+gameServer.define("redisGame", RedisGameRoom, { 
+  verifyPlayer: verifyPlayerId,
+  allowReconnection: true,
+  maxClients: 2 // Allow unlimited clients to prevent auto-disposal
+});
+gameServer.define("redisReplay", RedisReplayRoom, { 
+  verifyPlayer: verifyPlayerId,
+  allowReconnection: true,
+  maxClients: 0 // Allow unlimited clients to prevent auto-disposal
+});
 
 // Clean up stale Colyseus entries at startup
 async function cleanupStaleEntries() {
